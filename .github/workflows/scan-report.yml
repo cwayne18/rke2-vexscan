@@ -1,0 +1,146 @@
+name: VexScan Report
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'RKE2 release version to scan (e.g. v1.37.0+rke2r1 or v1.37.0-rke2r1). Leave empty to scan master.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reports-commit
+  cancel-in-progress: false
+
+env:
+  # Pin the vexscan version and the dashboard script ref for reproducible runs.
+  VEXSCAN_VERSION: latest
+  VEXSCAN_DASHBOARD_REF: main
+  VEXHUB: https://github.com/rancher/vexhub
+  PREFER_VENDOR: suse
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install vexscan
+        run: |
+          go install "github.com/cwayne18/vexscan@${VEXSCAN_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify vexscan
+        run: vexscan --version || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Fetch vexscan-dashboard.py
+        run: |
+          curl -fsSL \
+            "https://raw.githubusercontent.com/cwayne18/vexscan/${VEXSCAN_DASHBOARD_REF}/contrib/vexscan-dashboard.py" \
+            -o vexscan-dashboard.py
+          chmod +x vexscan-dashboard.py
+
+      - name: Build scan.sh arguments
+        id: scan_args
+        run: |
+          if [ -n "${{ inputs.release_version }}" ]; then
+            ARGS="--release ${{ inputs.release_version }} --prime"
+            MODE="release"
+          else
+            ARGS="master --prime"
+            MODE="scheduled"
+          fi
+          echo "args=$ARGS" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      - name: Run scan.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash scan.sh ${{ steps.scan_args.outputs.args }} \
+            --vexhub "$VEXHUB" \
+            --prefer-vendor "$PREFER_VENDOR" \
+            --output scan.json
+
+      - name: Determine scan id
+        id: scanid
+        run: |
+          MODE="${{ steps.scan_args.outputs.mode }}"
+          if [ "$MODE" = "release" ]; then
+            RELEASE="${{ inputs.release_version }}"
+            SAFE_RELEASE=$(echo "$RELEASE" | sed -E 's/\+/\./g; s/[^A-Za-z0-9._-]+/-/g; s/^-+|-+$//g')
+            [ -z "$SAFE_RELEASE" ] && SAFE_RELEASE="release"
+            BASE="scan-${SAFE_RELEASE}"
+          else
+            BASE="scan-$(date +%Y%m%d)"
+          fi
+          N=1
+          while [ -f "reports/${BASE}-${N}.json" ]; do
+            N=$((N + 1))
+          done
+          echo "id=${BASE}-${N}" >> "$GITHUB_OUTPUT"
+
+      - name: Render HTML dashboard and index
+        run: |
+          SCAN_ID="${{ steps.scanid.outputs.id }}"
+          mkdir -p reports/html
+          mv scan.json "reports/${SCAN_ID}.json"
+          python3 vexscan-dashboard.py "reports/${SCAN_ID}.json" -o "reports/html/${SCAN_ID}/"
+          python3 .github/scripts/generate_index.py reports/html
+
+      - name: Upload HTML report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vexscan-report-${{ github.run_number }}
+          path: reports/html/${{ steps.scanid.outputs.id }}
+          if-no-files-found: error
+
+      - name: Commit and push report + HTML
+        run: |
+          SCAN_ID="${{ steps.scanid.outputs.id }}"
+          BRANCH="${{ github.ref_name }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3; do
+            # Regenerate the index from the current tree (post-rebase on retries).
+            python3 .github/scripts/generate_index.py reports/html
+
+            git add "reports/${SCAN_ID}.json" "reports/html/${SCAN_ID}" reports/html/index.html
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              exit 0
+            fi
+
+            git commit -m "chore: add vexscan report and HTML for ${SCAN_ID}"
+
+            git fetch origin "$BRANCH"
+            if git push origin HEAD:"$BRANCH"; then
+              exit 0
+            fi
+
+            echo "Push failed (attempt $attempt/3), retrying..."
+            git reset --soft HEAD~1
+            git pull --rebase origin "$BRANCH"
+          done
+
+          echo "Failed to push report and HTML after 3 attempts"
+          exit 1

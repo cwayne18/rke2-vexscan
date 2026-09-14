@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+
+# Fetched at CI time, not committed
+/vexscan-dashboard.py
+
+# Generated scan artifacts (intermediate, not committed)
+/scan.json
+/images.txt
