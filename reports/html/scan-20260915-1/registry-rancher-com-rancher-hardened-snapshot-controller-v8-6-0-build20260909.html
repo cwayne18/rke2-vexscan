@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vexscan — registry.rancher.com/rancher/hardened-snapshot-controller:v8.6.0-build20260909</title>
+<style>
+:root {
+  --body-bg:          #FFFFFF;
+  --body-text:        #141419;
+  --muted:            #6C6C76;
+  --border:           #DCDEE7;
+  --box-bg:           #F4F5FA;
+  --header-bg:        #FFFFFF;
+  --link:             #1F67DB;
+  --code-bg:          #F4F5FA;
+  --table-header-bg:  #F4F5FA;
+  --table-hover-bg:   #F4F5FA;
+
+  --sev-critical-bg:     #B13333;
+  --sev-critical-text:   #FFFFFF;
+  --sev-critical-border: #7C0015;
+  --sev-high-bg:         #E45C1E;
+  --sev-high-text:       #FFFFFF;
+  --sev-high-border:     #B03A0A;
+  --sev-unknown-bg:      #6C6C76;
+  --sev-unknown-text:    #FFFFFF;
+  --sev-unknown-border:  #4A4A52;
+  --sev-medium-bg:       #FFE47A;
+  --sev-medium-text:     #473900;
+  --sev-medium-border:   #E5A200;
+  --sev-low-bg:          #DFE6F2;
+  --sev-low-text:        #1F67DB;
+  --sev-low-border:      #2673A6;
+  --sev-none-bg:         #EDEFF3;
+  --sev-none-text:       #6C6C76;
+  --sev-none-border:     #DCDEE7;
+
+  --ok-bg:     #27AE60;
+  --ok-text:   #FFFFFF;
+  --ok-border: #1A7A41;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--body-bg);
+  color: var(--body-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+               'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ---- Header ---- */
+.page-header {
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--border);
+  padding: 0 32px;
+  height: 55px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.page-header .brand {
+  font-weight: 600;
+  font-size: 17px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--body-text);
+  text-decoration: none;
+}
+.page-header .brand svg { width: 26px; height: 26px; flex-shrink: 0; }
+.page-header .subtitle {
+  font-size: 13px;
+  color: var(--muted);
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Layout ---- */
+.page-content { max-width: 1320px; margin: 0 auto; padding: 28px 24px 64px; }
+
+h1, h2, h3 { margin-top: 0; }
+h1 {
+  font-size: 22px; font-weight: 600;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+.page-sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+h2 { font-size: 16px; font-weight: 600; margin: 32px 0 10px; }
+h3 { font-size: 14px; font-weight: 600; margin: 22px 0 8px; }
+.anchored { display: flex; align-items: baseline; gap: 8px; }
+.anchored .anchor {
+  color: var(--muted); text-decoration: none; font-size: 12px;
+  opacity: 0; transition: opacity .15s ease;
+}
+.anchored:hover .anchor, .anchored:focus-within .anchor { opacity: 1; }
+.anchored .anchor:hover { color: var(--link); }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+               'Liberation Mono', monospace;
+  font-size: 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* ---- Verdict cards ---- */
+.cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 8px; }
+.card {
+  flex: 1 1 180px;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: var(--body-bg);
+  text-decoration: none;
+  color: inherit;
+  min-width: 160px;
+}
+a.card:hover { border-color: var(--link); border-left-color: var(--link); }
+.card .n { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.card .k { font-size: 11px; font-weight: 700; letter-spacing: .06em;
+           color: var(--muted); text-transform: uppercase; }
+.card .note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.card-affected     { border-left-color: var(--sev-critical-bg); }
+.card-vexed        { border-left-color: var(--ok-border); }
+.card-undetermined { border-left-color: var(--sev-medium-border); }
+.card-ruled-out    { border-left-color: var(--link); }
+
+/* ---- Tables ---- */
+.report-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.report-table thead tr { background: var(--table-header-bg); }
+.report-table th {
+  padding: 9px 12px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.report-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  word-break: break-word;
+}
+.report-table tbody:last-child tr:last-child td { border-bottom: none; }
+.report-table a { color: var(--link); text-decoration: none; }
+.report-table a:hover { text-decoration: underline; }
+.report-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+/* A findings table with every optional column earned is wider than a laptop.
+   Scrolling it beats wrapping a purl across four lines. */
+.table-wrap { overflow-x: auto; }
+.report-table .nowrap { white-space: nowrap; }
+.report-table .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--body-bg);
+  margin-bottom: 14px;
+}
+details.panel > summary {
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+  font-size: 13px;
+  background: var(--table-header-bg);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+details.panel > summary::-webkit-details-marker { display: none; }
+details.panel > summary::before {
+  content: "\25be";
+  display: inline-block;
+  transition: transform .15s ease;
+  color: var(--muted);
+}
+details.panel:not([open]) > summary::before { transform: rotate(-90deg); }
+details.panel[open] > summary { border-bottom: 1px solid var(--border); }
+summary .note { font-weight: 400; color: var(--muted); font-size: 12px; }
+summary .count { color: var(--muted); font-weight: 600; }
+
+/* ---- Finding rows ---- */
+tr.f-row { cursor: pointer; }
+tr.f-row:hover > td { background: var(--table-hover-bg); }
+tr.f-row td.expander { color: var(--muted); width: 1em; user-select: none; }
+tbody.open tr.f-row > td { background: var(--table-hover-bg); }
+tr.f-detail > td {
+  background: var(--box-bg);
+  padding: 12px 16px 14px 34px;
+  font-size: 12.5px;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 14px;
+  margin: 0;
+}
+.detail-grid dt { color: var(--muted); white-space: nowrap; }
+.detail-grid dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+.detail-grid dd.prose { font-family: inherit; word-break: normal; }
+.evidence { margin: 10px 0 0; padding: 0; list-style: none; }
+.evidence li { display: flex; gap: 8px; margin-bottom: 3px; }
+.evidence .origin {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.evidence .blocking {
+  flex: 0 0 auto;
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--sev-high-text);
+  background: var(--sev-high-bg);
+  border: 1px solid var(--sev-high-border);
+  border-radius: 4px;
+  padding: 0 5px;
+  align-self: center;
+}
+.vendor-block {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--ok-border);
+  background: var(--body-bg);
+  border-radius: 0 4px 4px 0;
+}
+.vendor-block .who { font-weight: 600; }
+.vendor-block p { margin: 4px 0 0; }
+
+/* ---- Badges ---- */
+.sev, .epss, .kev, .pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.sev-CRITICAL { background: var(--sev-critical-bg); color: var(--sev-critical-text); border-color: var(--sev-critical-border); }
+.sev-HIGH     { background: var(--sev-high-bg);     color: var(--sev-high-text);     border-color: var(--sev-high-border);     }
+.sev-UNKNOWN  { background: var(--sev-unknown-bg);  color: var(--sev-unknown-text);  border-color: var(--sev-unknown-border);  }
+.sev-MEDIUM   { background: var(--sev-medium-bg);   color: var(--sev-medium-text);   border-color: var(--sev-medium-border);   }
+.sev-LOW      { background: var(--sev-low-bg);      color: var(--sev-low-text);      border-color: var(--sev-low-border);      }
+.sev-NONE     { background: var(--sev-none-bg);     color: var(--sev-none-text);     border-color: var(--sev-none-border);     }
+
+/* A pill, not a square: exploit likelihood is a different kind of fact from
+   the impact rating sitting next to it, and should not read as one. */
+.epss { border-radius: 999px; gap: 6px; font-variant-numeric: tabular-nums; }
+.epss-meter {
+  width: 32px; height: 5px; border-radius: 3px;
+  background: rgba(0,0,0,.18); overflow: hidden; flex: 0 0 auto;
+}
+.epss-meter span { display: block; height: 100%; background: currentColor; opacity: .85; }
+.epss-crit { background: var(--sev-critical-bg); color: var(--sev-critical-text); border-color: var(--sev-critical-border); }
+.epss-high { background: var(--sev-high-bg);     color: var(--sev-high-text);     border-color: var(--sev-high-border);     }
+.epss-med  { background: var(--sev-medium-bg);   color: var(--sev-medium-text);   border-color: var(--sev-medium-border);   }
+.epss-low  { background: var(--sev-low-bg);      color: var(--sev-low-text);      border-color: var(--sev-low-border);      }
+.epss-none { background: var(--sev-none-bg);     color: var(--sev-none-text);     border-color: var(--sev-none-border); padding: 2px 10px; }
+.kev { background: var(--sev-critical-bg); color: #FFFFFF; border-color: var(--sev-critical-border); }
+.pill { background: var(--box-bg); color: var(--muted); border-color: var(--border); font-weight: 600; }
+.pill-vex { background: #EAF7EF; color: #1A7A41; border-color: var(--ok-border); }
+
+.muted { color: var(--muted); }
+.nofix { color: var(--muted); font-style: italic; }
+
+/* ---- Banners ---- */
+.banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 16px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.banner-ok   { background: #EAF7EF; border: 1px solid var(--ok-border); color: #1A7A41; }
+.banner-warn { background: #FFF7E8; border: 1px solid var(--sev-medium-border); color: #7A5C00; }
+.banner-bad  { background: #FDEDEC; border: 1px solid var(--sev-critical-border); color: #8E2A2A; }
+.banner .icon { font-size: 17px; line-height: 1; }
+.banner .sub { font-weight: 400; color: inherit; opacity: .85; }
+
+/* ---- Filter ---- */
+.filter-bar { display: flex; align-items: center; gap: 10px; margin: 18px 0 4px; }
+.filter-bar input {
+  flex: 1 1 auto;
+  max-width: 420px;
+  padding: 7px 11px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--body-text);
+  background: var(--body-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.filter-bar input:focus { outline: 2px solid var(--link); outline-offset: -1px; }
+.filter-bar .hits { font-size: 12px; color: var(--muted); }
+tbody.filtered { display: none; }
+
+/* ---- Footer ---- */
+.page-footer {
+  margin-top: 44px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.page-footer dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 14px;
+  margin: 0 0 10px;
+}
+.page-footer dt { color: var(--muted); }
+.page-footer dd { margin: 0; }
+
+/* ---- Dark mode ---- */
+:root[data-theme="dark"] {
+  --body-bg:          #16171C;
+  --body-text:        #E6E6EC;
+  --muted:            #9B9BA6;
+  --border:           #2D2F39;
+  --box-bg:           #1E1F26;
+  --header-bg:        #1A1B21;
+  --link:             #5B9BFF;
+  --code-bg:          #22232B;
+  --table-header-bg:  #22232B;
+  --table-hover-bg:   #24262F;
+  --sev-low-bg:       #1E2A40;
+  --sev-low-text:     #8FB6FF;
+  --sev-none-bg:      #2A2C35;
+  --sev-none-text:    #9B9BA6;
+  --sev-none-border:  #3A3C46;
+}
+:root[data-theme="dark"] .page-header { box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+:root[data-theme="dark"] .banner-ok   { background: #15291E; color: #5FCF8C; }
+:root[data-theme="dark"] .banner-warn { background: #241F14; color: #E0B84D; }
+:root[data-theme="dark"] .banner-bad  { background: #2A1618; color: #F08A8A; }
+:root[data-theme="dark"] .pill-vex    { background: #15291E; color: #5FCF8C; }
+:root[data-theme="dark"] .vendor-block { background: var(--box-bg); }
+
+.theme-toggle {
+  margin-left: auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; padding: 0;
+  font-size: 15px; line-height: 1; cursor: pointer;
+  background: var(--box-bg);
+  color: var(--body-text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  flex: 0 0 auto;
+}
+.theme-toggle:hover { border-color: var(--link); }
+.theme-toggle .icon-dark { display: none; }
+:root[data-theme="dark"] .theme-toggle .icon-light { display: none; }
+:root[data-theme="dark"] .theme-toggle .icon-dark { display: inline; }
+
+@media print {
+  .page-header, .theme-toggle, .filter-bar { display: none; }
+  details.panel > summary { display: none; }
+  tr.f-detail { display: table-row !important; }
+}
+</style>
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem('vexscan-theme');
+    var prefersDark = window.matchMedia &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (stored === 'dark' || (!stored && prefersDark)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+<header class="page-header">
+  <div class="brand"><svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="7" fill="#1F67DB"/><path d="M9 16.2l4.6 4.6L23 11.4" stroke="white" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg> vexscan</div>
+  <span class="subtitle">registry.rancher.com/rancher/hardened-snapshot-controller:v8.6.0-build20260909</span>
+  <a class="subtitle" href="index.html" style="margin-left:auto">&#8592; all targets</a><button type="button" class="theme-toggle" aria-label="Toggle dark mode" title="Toggle dark mode" onclick="vexToggleTheme()"><span class="icon-light" aria-hidden="true">&#127769;</span><span class="icon-dark" aria-hidden="true">&#9728;</span></button>
+</header>
+<main class="page-content">
+<h1>registry.rancher.com/rancher/hardened-snapshot-controller:v8.6.0-build20260909</h1><p class="page-sub">image scan · 5 findings</p><div class="banner banner-warn"><span class="icon">&#9888;</span><span>1 finding to act on <span class="sub">&mdash; 1 unknown</span></span></div><div class="cards"><a class="card card-affected" href="#affected"><div class="k">AFFECTED</div><div class="n">1</div><div class="note">present and loadable</div></a><div class="card card-vexed"><div class="k">ALREADY VEXED</div><div class="n">0</div><div class="note">somebody has answered</div></div><div class="card card-undetermined"><div class="k">UNDETERMINED</div><div class="n">0</div><div class="note">needs a human</div></div><a class="card card-ruled-out" href="#ruled-out"><div class="k">RULED OUT</div><div class="n">4</div><div class="note">not present or unreachable</div></a></div><div class="filter-bar"><input type="search" placeholder="Filter by CVE, package, binary, justification…" data-scope="sections" data-hits="hits" oninput="vexFilter(this)" aria-label="Filter findings"><span class="hits" id="hits"></span></div><div id="sections"><details class="panel" open id="affected"><summary>AFFECTED<span class="count">(1)</span> <span class="note">&mdash; vulnerable code is present and can be loaded</span></summary><div class="table-wrap"><table class="report-table"><thead><tr><th class="expander"></th><th>Severity</th><th>Advisory</th><th>Package</th><th>Version</th><th>Location</th><th>Fixed in</th><th>Method</th></tr></thead><tbody class="f-group" data-search="go-2026-6094 go-2026-6094 go-2026-6094 go-2026-6094 github.com/google/cel-go github.com/google/cel-go v0.29.0 /snapshot-controller /snapshot-controller golang unknown linked pkg:golang/github.com%2fgoogle%2fcel-go@v0.29.0"><tr class="f-row" tabindex="0" role="button" aria-expanded="false"><td class="expander" aria-hidden="true">▸</td><td class="nowrap"><span class="sev sev-UNKNOWN" title="No severity was published for this advisory, which is not the same as a low one">UNKNOWN</span></td><td class="nowrap"><a href="https://pkg.go.dev/vuln/GO-2026-6094" target="_blank" rel="noopener noreferrer">GO-2026-6094</a></td><td class="mono">github.com/google/cel-go</td><td class="mono">v0.29.0</td><td class="mono">/snapshot-controller</td><td class="mono">0.30.0</td><td class="mono"></td></tr><tr class="f-detail" hidden><td colspan="8"><dl class="detail-grid"><dt>advisory</dt><dd><a href="https://pkg.go.dev/vuln/GO-2026-6094" target="_blank" rel="noopener noreferrer">GO-2026-6094</a></dd><dt>from</dt><dd>golang</dd><dt>fixed in</dt><dd>0.30.0</dd><dt>epss</dt><dd><span class="muted">not scored &mdash; this advisory has no CVE id, and both feeds are keyed by CVE</span></dd><dt>purl</dt><dd>pkg:golang/github.com%2Fgoogle%2Fcel-go@v0.29.0</dd><dt>binary</dt><dd>/snapshot-controller</dd><dt>packages</dt><dd>github.com/google/cel-go/ext (package)</dd></dl><ul class="evidence"><li><span class="origin">[govulncheck-unavailable]</span><span>govulncheck is not on PATH, so binary-mode reachability was not tested; install govulncheck to let this finding be ruled not_in_execute_path when its code is unreachable</span></li></ul></td></tr></tbody></table></div></details><details class="panel" id="ruled-out"><summary>RULED OUT<span class="count">(4)</span> <span class="note">&mdash; the vulnerable code is not present or cannot run</span></summary><div class="table-wrap"><table class="report-table"><thead><tr><th class="expander"></th><th>Severity</th><th>Advisory</th><th>Package</th><th>Version</th><th>Location</th><th>Fixed in</th><th title="EPSS percentile: where this CVE ranks among all scored CVEs, the same figure --format text prints. The probability itself is on each badge and in the expanded row.">EPSS</th><th>Method</th></tr></thead><tbody class="f-group" data-search="cve-2026-73500 go-2026-6107 cve-2026-73500 go-2026-6107 go.etcd.io/etcd/client/pkg/v3 go.etcd.io/etcd/client/pkg/v3 v3.6.11 /snapshot-controller /snapshot-controller golang unknown not_present pclntab vulnerable_code_not_present pkg:golang/go.etcd.io%2fetcd%2fclient%2fpkg%2fv3@v3.6.11 not_affected vulnerable_code_not_in_execute_path rancher security team"><tr class="f-row" tabindex="0" role="button" aria-expanded="false"><td class="expander" aria-hidden="true">▸</td><td class="nowrap"><span class="sev sev-UNKNOWN" title="No severity was published for this advisory, which is not the same as a low one">UNKNOWN</span></td><td class="nowrap"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-73500" target="_blank" rel="noopener noreferrer">CVE-2026-73500</a></td><td class="mono">go.etcd.io/etcd/client/pkg/v3</td><td class="mono">v3.6.11</td><td class="mono">/snapshot-controller</td><td class="mono">3.6.14</td><td class="nowrap"><span class="epss epss-low" title="Ranks in the 33rd percentile of scored CVEs. EPSS puts the probability of exploitation in the next 30 days at 0.00396 (FIRST.org)"><span class="epss-meter"><span style="width:33%"></span></span><span>33.2%</span></span></td><td class="mono">pclntab</td></tr><tr class="f-detail" hidden><td colspan="9"><dl class="detail-grid"><dt>advisory</dt><dd><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-73500" target="_blank" rel="noopener noreferrer">CVE-2026-73500</a> <span class="muted">(also <a href="https://pkg.go.dev/vuln/GO-2026-6107" target="_blank" rel="noopener noreferrer">GO-2026-6107</a>)</span></dd><dt>from</dt><dd>golang</dd><dt>fixed in</dt><dd>3.6.14 <span class="muted">(also fixed in 3.5.33, 3.7.1)</span></dd><dt>epss</dt><dd><span class="epss epss-low" title="Ranks in the 33rd percentile of scored CVEs. EPSS puts the probability of exploitation in the next 30 days at 0.00396 (FIRST.org)"><span class="epss-meter"><span style="width:33%"></span></span><span>33.2%</span></span> <span class="muted">33.2% percentile (epss 0.00396)</span></dd><dt>purl</dt><dd>pkg:golang/go.etcd.io%2Fetcd%2Fclient%2Fpkg%2Fv3@v3.6.11</dd><dt>binary</dt><dd>/snapshot-controller</dd><dt>packages</dt><dd>go.etcd.io/etcd/client/pkg/v3/transport (package)</dd><dt>vex</dt><dd>vulnerable_code_not_present <span class="muted">[pclntab]</span></dd></dl><ul class="evidence"><li><span class="origin">[vendor-vex]</span><span>Rancher Security team published not_affected for pkg:golang/github.com/kubernetes-csi/external-snapshotter/v8 (vulnerable_code_not_in_execute_path); statement names pkg:golang/go.etcd.io/etcd/client/pkg/v3@v3.6.11; component is pkg:golang/go.etcd.io%2Fetcd%2Fclient%2Fpkg%2Fv3@v3.6.11</span></li></ul><div class="vendor-block"><div class="who">Rancher Security team says <strong>not_affected</strong> <span class="muted">(vulnerable_code_not_in_execute_path)</span></div><p>Govulncheck determined that the vulnerable code isn&#x27;t called</p><p class="muted">product <code>pkg:golang/github.com/kubernetes-csi/external-snapshotter/v8</code> · published 2026-09-02T02:30:48Z · from https://github.com/rancher/vexhub</p><p class="muted">matched loosely: statement names pkg:golang/go.etcd.io/etcd/client/pkg/v3@v3.6.11; component is pkg:golang/go.etcd.io%2Fetcd%2Fclient%2Fpkg%2Fv3@v3.6.11</p></div></td></tr></tbody><tbody class="f-group" data-search="cve-2026-56855 go-2026-6355 cve-2026-56855 go-2026-6355 golang.org/x/crypto golang.org/x/crypto v0.55.0 /snapshot-controller /snapshot-controller golang high not_present pclntab vulnerable_code_not_present pkg:golang/golang.org%2fx%2fcrypto@v0.55.0 not_affected vulnerable_code_not_present rancher security team"><tr class="f-row" tabindex="0" role="button" aria-expanded="false"><td class="expander" aria-hidden="true">▸</td><td class="nowrap"><span class="sev sev-HIGH">HIGH</span></td><td class="nowrap"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-56855" target="_blank" rel="noopener noreferrer">CVE-2026-56855</a></td><td class="mono">golang.org/x/crypto</td><td class="mono">v0.55.0</td><td class="mono">/snapshot-controller</td><td class="mono">0.56.0</td><td class="nowrap"><span class="epss epss-low" title="Ranks in the 31st percentile of scored CVEs. EPSS puts the probability of exploitation in the next 30 days at 0.00378 (FIRST.org)"><span class="epss-meter"><span style="width:31%"></span></span><span>31.3%</span></span></td><td class="mono">pclntab</td></tr><tr class="f-detail" hidden><td colspan="9"><dl class="detail-grid"><dt>advisory</dt><dd><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-56855" target="_blank" rel="noopener noreferrer">CVE-2026-56855</a> <span class="muted">(also <a href="https://pkg.go.dev/vuln/GO-2026-6355" target="_blank" rel="noopener noreferrer">GO-2026-6355</a>)</span></dd><dt>from</dt><dd>golang</dd><dt>severity</dt><dd><span class="sev sev-HIGH">HIGH</span> <span class="muted">CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H</span></dd><dt>fixed in</dt><dd>0.56.0</dd><dt>epss</dt><dd><span class="epss epss-low" title="Ranks in the 31st percentile of scored CVEs. EPSS puts the probability of exploitation in the next 30 days at 0.00378 (FIRST.org)"><span class="epss-meter"><span style="width:31%"></span></span><span>31.3%</span></span> <span class="muted">31.3% percentile (epss 0.00378)</span></dd><dt>purl</dt><dd>pkg:golang/golang.org%2Fx%2Fcrypto@v0.55.0</dd><dt>binary</dt><dd>/snapshot-controller</dd><dt>packages</dt><dd>golang.org/x/crypto/ssh (package)</dd><dt>vex</dt><dd>vulnerable_code_not_present <span class="muted">[pclntab]</span></dd></dl><ul class="evidence"><li><span class="origin">[prefer-vendor]</span><span>SUSE Security Team rates this HIGH, used instead of UNKNOWN (preferred vendor score)</span></li><li><span class="origin">[vendor-vex]</span><span>Rancher Security team published not_affected for pkg:golang/github.com/kubernetes-csi/external-snapshotter/v8 (vulnerable_code_not_present); statement names pkg:golang/golang.org/x/crypto@v0.55.0; component is pkg:golang/golang.org%2Fx%2Fcrypto@v0.55.0</span></li></ul><div class="vendor-block"><div class="who">Rancher Security team says <strong>not_affected</strong> <span class="muted">(vulnerable_code_not_present)</span></div><p>Govulncheck determined that the vulnerable code isn&#x27;t called</p><p class="muted">product <code>pkg:golang/github.com/kubernetes-csi/external-snapshotter/v8</code> · published 2026-09-03T02:19:37Z · from https://github.com/rancher/vexhub</p><p class="muted">matched loosely: statement names pkg:golang/golang.org/x/crypto@v0.55.0; component is pkg:golang/golang.org%2Fx%2Fcrypto@v0.55.0</p></div></td></tr></tbody><tbody class="f-group" data-search="cve-2026-78662 go-2026-6354 cve-2026-78662 go-2026-6354 golang.org/x/crypto golang.org/x/crypto v0.55.0 /snapshot-controller /snapshot-controller golang high not_present pclntab vulnerable_code_not_present pkg:golang/golang.org%2fx%2fcrypto@v0.55.0 not_affected vulnerable_code_not_present rancher security team"><tr class="f-row" tabindex="0" role="button" aria-expanded="false"><td class="expander" aria-hidden="true">▸</td><td class="nowrap"><span class="sev sev-HIGH">HIGH</span></td><td class="nowrap"><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-78662" target="_blank" rel="noopener noreferrer">CVE-2026-78662</a></td><td class="mono">golang.org/x/crypto</td><td class="mono">v0.55.0</td><td class="mono">/snapshot-controller</td><td class="mono">0.56.0</td><td class="nowrap"><span class="epss epss-low" title="Ranks in the 24th percentile of scored CVEs. EPSS puts the probability of exploitation in the next 30 days at 0.00315 (FIRST.org)"><span class="epss-meter"><span style="width:24%"></span></span><span>24.3%</span></span></td><td class="mono">pclntab</td></tr><tr class="f-detail" hidden><td colspan="9"><dl class="detail-grid"><dt>advisory</dt><dd><a href="https://nvd.nist.gov/vuln/detail/CVE-2026-78662" target="_blank" rel="noopener noreferrer">CVE-2026-78662</a> <span class="muted">(also <a href="https://pkg.go.dev/vuln/GO-2026-6354" target="_blank" rel="noopener noreferrer">GO-2026-6354</a>)</span></dd><dt>from</dt><dd>golang</dd><dt>severity</dt><dd><span class="sev sev-HIGH">HIGH</span> <span class="muted">CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N</span></dd><dt>fixed in</dt><dd>0.56.0</dd><dt>epss</dt><dd><span class="epss epss-low" title="Ranks in the 24th percentile of scored CVEs. EPSS puts the probability of exploitation in the next 30 days at 0.00315 (FIRST.org)"><span class="epss-meter"><span style="width:24%"></span></span><span>24.3%</span></span> <span class="muted">24.3% percentile (epss 0.00315)</span></dd><dt>purl</dt><dd>pkg:golang/golang.org%2Fx%2Fcrypto@v0.55.0</dd><dt>binary</dt><dd>/snapshot-controller</dd><dt>packages</dt><dd>golang.org/x/crypto/ssh (package)</dd><dt>vex</dt><dd>vulnerable_code_not_present <span class="muted">[pclntab]</span></dd></dl><ul class="evidence"><li><span class="origin">[prefer-vendor]</span><span>SUSE Security Team rates this HIGH, used instead of UNKNOWN (preferred vendor score)</span></li><li><span class="origin">[vendor-vex]</span><span>Rancher Security team published not_affected for pkg:golang/github.com/kubernetes-csi/external-snapshotter/v8 (vulnerable_code_not_present); statement names pkg:golang/golang.org/x/crypto@v0.55.0; component is pkg:golang/golang.org%2Fx%2Fcrypto@v0.55.0</span></li></ul><div class="vendor-block"><div class="who">Rancher Security team says <strong>not_affected</strong> <span class="muted">(vulnerable_code_not_present)</span></div><p>Govulncheck determined that the vulnerable code isn&#x27;t called</p><p class="muted">product <code>pkg:golang/github.com/kubernetes-csi/external-snapshotter/v8</code> · published 2026-09-03T02:19:37Z · from https://github.com/rancher/vexhub</p><p class="muted">matched loosely: statement names pkg:golang/golang.org/x/crypto@v0.55.0; component is pkg:golang/golang.org%2Fx%2Fcrypto@v0.55.0</p></div></td></tr></tbody><tbody class="f-group" data-search="go-2026-5932 go-2026-5932 go-2026-5932 go-2026-5932 golang.org/x/crypto golang.org/x/crypto v0.55.0 /snapshot-controller /snapshot-controller golang unknown not_present pclntab vulnerable_code_not_present pkg:golang/golang.org%2fx%2fcrypto@v0.55.0"><tr class="f-row" tabindex="0" role="button" aria-expanded="false"><td class="expander" aria-hidden="true">▸</td><td class="nowrap"><span class="sev sev-UNKNOWN" title="No severity was published for this advisory, which is not the same as a low one">UNKNOWN</span></td><td class="nowrap"><a href="https://pkg.go.dev/vuln/GO-2026-5932" target="_blank" rel="noopener noreferrer">GO-2026-5932</a></td><td class="mono">golang.org/x/crypto</td><td class="mono">v0.55.0</td><td class="mono">/snapshot-controller</td><td class="mono"><span class="nofix">no fix</span></td><td class="nowrap"><span class="epss epss-none" title="Not scored: this advisory has no CVE id, and both feeds are keyed by CVE">&mdash;</span></td><td class="mono">pclntab</td></tr><tr class="f-detail" hidden><td colspan="9"><dl class="detail-grid"><dt>advisory</dt><dd><a href="https://pkg.go.dev/vuln/GO-2026-5932" target="_blank" rel="noopener noreferrer">GO-2026-5932</a></dd><dt>from</dt><dd>golang</dd><dt>epss</dt><dd><span class="muted">not scored &mdash; this advisory has no CVE id, and both feeds are keyed by CVE</span></dd><dt>purl</dt><dd>pkg:golang/golang.org%2Fx%2Fcrypto@v0.55.0</dd><dt>binary</dt><dd>/snapshot-controller</dd><dt>packages</dt><dd>golang.org/x/crypto/openpgp, golang.org/x/crypto/openpgp/armor, golang.org/x/crypto/openpgp/clearsign, golang.org/x/crypto/openpgp/elgamal, golang.org/x/crypto/openpgp/errors, golang.org/x/crypto/openpgp/packet, golang.org/x/crypto/openpgp/s2k (package)</dd><dt>vex</dt><dd>vulnerable_code_not_present <span class="muted">[pclntab]</span></dd></dl></td></tr></tbody></table></div></details></div><h2 class="anchored" id="coverage">Scan coverage<a class="anchor" href="#coverage" aria-label="Link to this section">#</a></h2><div class="table-wrap"><table class="report-table"><thead><tr><th>Ecosystem</th><th class="num">Components</th><th class="num">Affected</th><th class="num">Vexed</th><th class="num">Undetermined</th><th class="num">Ruled out</th><th>Status</th></tr></thead><tbody><tr><td><code>golang</code></td><td class="num">104</td><td class="num">1</td><td class="num">0</td><td class="num">0</td><td class="num">4</td><td><span class="muted">ok</span></td></tr></tbody></table></div><h3 class="anchored" id="vex-hubs">VEX hubs<a class="anchor" href="#vex-hubs" aria-label="Link to this section">#</a></h3><div class="table-wrap"><table class="report-table"><thead><tr><th>Hub</th><th>Author</th><th class="num">Indexes</th><th class="num">Matched</th><th>Status</th></tr></thead><tbody><tr><td><a href="https://github.com/rancher/vexhub" target="_blank" rel="noopener noreferrer">https://github.com/rancher/vexhub</a></td><td>Rancher Security team</td><td class="num">1168</td><td class="num">3</td><td><span class="muted">ok</span></td></tr></tbody></table></div><p class="muted">Triage: scored 3, 0 known exploited, 2 with no CVE id to look up. Feeds as of EPSS 2026-09-14; KEV 2026.09.14.</p><div class="page-footer"><dl><dt>scanned by</dt><dd>vexscan v0.16.0</dd><dt>started</dt><dd>2026-09-15 10:36 UTC</dd><dt>took</dt><dd>7.9s</dd><dt>advisories from</dt><dd>https://api.osv.dev/v1</dd><dt>advisories as of</dt><dd>2026-09-15 10:36 UTC</dd></dl><div>Rendered from <code>scan-20260915-1.json</code> by contrib/vexscan-dashboard.py &nbsp;&middot;&nbsp; 2026-09-15 10:40 UTC</div></div>
+</main>
+<script>
+function vexToggleTheme() {
+  var d = document.documentElement;
+  var dark = d.getAttribute('data-theme') === 'dark';
+  if (dark) { d.removeAttribute('data-theme'); }
+  else { d.setAttribute('data-theme', 'dark'); }
+  try { localStorage.setItem('vexscan-theme', dark ? 'light' : 'dark'); } catch (e) {}
+}
+
+document.addEventListener('click', function (ev) {
+  var row = ev.target.closest ? ev.target.closest('tr.f-row') : null;
+  if (!row) { return; }
+  if (ev.target.closest('a')) { return; }   // a CVE link is not an expand
+  var body = row.parentNode;
+  var open = body.classList.toggle('open');
+  var detail = body.querySelector('tr.f-detail');
+  if (detail) { detail.hidden = !open; }
+  row.setAttribute('aria-expanded', open ? 'true' : 'false');
+  var caret = row.querySelector('.expander');
+  if (caret) { caret.textContent = open ? '\u25be' : '\u25b8'; }
+});
+
+document.addEventListener('keydown', function (ev) {
+  if (ev.key !== 'Enter' && ev.key !== ' ') { return; }
+  var row = ev.target.closest ? ev.target.closest('tr.f-row') : null;
+  if (!row) { return; }
+  ev.preventDefault();
+  row.click();
+});
+
+function vexFilter(input) {
+  var q = input.value.trim().toLowerCase();
+  var scope = document.getElementById(input.dataset.scope);
+  if (!scope) { return; }
+  var bodies = scope.querySelectorAll('tbody.f-group');
+  var shown = 0;
+  for (var i = 0; i < bodies.length; i++) {
+    var hit = !q || bodies[i].dataset.search.indexOf(q) !== -1;
+    bodies[i].classList.toggle('filtered', !hit);
+    if (hit) { shown++; }
+  }
+  var hits = document.getElementById(input.dataset.hits);
+  if (hits) {
+    hits.textContent = q ? shown + ' of ' + bodies.length + ' shown' : '';
+  }
+  // Every section opens while filtering, so a match hiding inside a collapsed
+  // RULED OUT is not silently missed. Clearing the box puts each one back the
+  // way the page shipped it rather than leaving the whole report unrolled.
+  var panels = scope.querySelectorAll('details.panel');
+  for (var j = 0; j < panels.length; j++) {
+    if (panels[j].dataset.wasOpen === undefined) {
+      panels[j].dataset.wasOpen = panels[j].open ? '1' : '0';
+    }
+    panels[j].open = q ? true : panels[j].dataset.wasOpen === '1';
+  }
+}
+</script>
+</body>
+</html>
