@@ -24,6 +24,8 @@ env:
   VEXSCAN_DASHBOARD_REF: main
   VEXHUB: https://github.com/rancher/vexhub
   PREFER_VENDOR: suse
+  # Report only CRITICAL/HIGH findings that have a published fix.
+  SEVERITY: CRITICAL,HIGH
 
 jobs:
   scan:
@@ -77,6 +79,8 @@ jobs:
           bash scan.sh ${{ steps.scan_args.outputs.args }} \
             --vexhub "$VEXHUB" \
             --prefer-vendor "$PREFER_VENDOR" \
+            --severity "$SEVERITY" \
+            --fixed-only \
             --output scan.json
 
       - name: Determine scan id

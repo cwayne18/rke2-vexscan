@@ -9,6 +9,10 @@ reachability tests per ecosystem and resolving published [VEX](https://www.cisa.
 statements from [rancher/vexhub](https://github.com/rancher/vexhub). Findings are
 bucketed into **affected**, **already vexed**, **undetermined** and **ruled out**.
 
+By default the report is scoped to what is **actionable**: only **CRITICAL** and
+**HIGH** findings, and only CVEs that have a **published fix**. Both are
+adjustable (`--severity`, `--no-fixed-only`).
+
 Reports are published to GitHub Pages, rendered from the raw vexscan JSON by the
 upstream [`contrib/vexscan-dashboard.py`](https://github.com/cwayne18/vexscan/blob/main/contrib/vexscan-dashboard.py).
 
@@ -54,7 +58,8 @@ Scan a published release:
 
 ```
 Usage: scan.sh [branch] [--release <version>] [--prime] [--no-prime]
-               [--vexhub <url>] [--prefer-vendor <vendor>] [--output <file>]
+               [--vexhub <url>] [--prefer-vendor <vendor>] [--severity <list>]
+               [--fixed-only] [--no-fixed-only] [--output <file>]
 ```
 
 - `branch` — build the image list from this RKE2 branch (default `master`).
@@ -66,6 +71,10 @@ Usage: scan.sh [branch] [--release <version>] [--prime] [--no-prime]
 - `--vexhub <url>` — VEX hub to resolve statements from (default
   `https://github.com/rancher/vexhub`).
 - `--prefer-vendor <vendor>` — preferred VEX vendor (default `suse`).
+- `--severity <list>` — comma-separated severities to report (default
+  `CRITICAL,HIGH`). Pass `--severity ''` to report every severity.
+- `--fixed-only` / `--no-fixed-only` — keep only CVEs that have a published fix.
+  On by default; `--no-fixed-only` includes findings with no fix yet.
 - `--output <file>` — JSON output path (default `scan.json`).
 
 ## License

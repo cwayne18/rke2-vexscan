@@ -19,6 +19,8 @@ use_prime_ingress="false"
 prime_explicit=""
 vexhub="https://github.com/rancher/vexhub"
 prefer_vendor="suse"
+severity_filter="CRITICAL,HIGH"
+fixed_only="true"
 # Registry used to reproduce PRIME builds. build-images emits the PRIME/hardened
 # image variants only when REGISTRY != docker.io; the final scan targets
 # registry.rancher.com.
@@ -27,7 +29,8 @@ release_version=""
 
 usage() {
     echo "Usage: $0 [branch] [--release <version>] [--prime] [--no-prime]"
-    echo "          [--vexhub <url>] [--prefer-vendor <vendor>] [--output <file>]"
+    echo "          [--vexhub <url>] [--prefer-vendor <vendor>] [--severity <list>]"
+    echo "          [--fixed-only] [--no-fixed-only] [--output <file>]"
     echo ""
     echo "Examples:"
     echo "  $0                         # scan master (built from source)"
@@ -35,8 +38,11 @@ usage() {
     echo "  $0 --release v1.37.0+rke2r1"
     echo "  $0 --release v1.37.0-rke2r1"
     echo "  $0 --prime                 # rewrite images to the prime registry"
+    echo "  $0 --severity ''           # report every severity (default: CRITICAL,HIGH)"
+    echo "  $0 --no-fixed-only         # include CVEs with no fix (default: fixed only)"
     echo "  $0 --output rke2-master.json"
     echo ""
+    echo "By default the report is limited to CRITICAL/HIGH findings that have a fix."
     echo "Note: scheduled scans run '$0 master --prime'."
 }
 
@@ -78,6 +84,19 @@ while [[ $# -gt 0 ]]; do
             fi
             prefer_vendor="$2"
             shift 2
+            ;;
+        --severity)
+            # Empty string is allowed and means "all severities".
+            severity_filter="$2"
+            shift 2
+            ;;
+        --fixed-only)
+            fixed_only="true"
+            shift
+            ;;
+        --no-fixed-only)
+            fixed_only="false"
+            shift
             ;;
         -o|--output)
             if [[ -z "$2" ]]; then
@@ -290,17 +309,59 @@ EOF
     images_source="./images.txt"
 fi
 
-echo "Running vexscan (vexhub=${vexhub}, prefer-vendor=${prefer_vendor})..."
-vexscan \
-    --images-from "$images_source" \
-    --all --triage \
-    --vexhub "$vexhub" \
-    --prefer-vendor "$prefer_vendor" \
-    --format json > "$output_file"
+echo "Running vexscan (vexhub=${vexhub}, prefer-vendor=${prefer_vendor}, severity=${severity_filter:-all})..."
+vexscan_args=(
+    --images-from "$images_source"
+    --all --triage
+    --vexhub "$vexhub"
+    --prefer-vendor "$prefer_vendor"
+)
+if [[ -n "$severity_filter" ]]; then
+    vexscan_args+=(--severity "$severity_filter")
+fi
+vexscan_args+=(--format json)
+
+vexscan "${vexscan_args[@]}" > "$output_file"
 
 if [[ ! -s "$output_file" ]]; then
     echo "Error: vexscan produced no output"
     exit 1
+fi
+
+# vexscan has no "fixed only" flag, so drop findings with no published fix here.
+# A finding is fixable when it carries a fixed_version (or fixed_versions list).
+if [[ "$fixed_only" == "true" ]]; then
+    echo "Filtering report to findings with a published fix..."
+    python3 - "$output_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    doc = json.load(fh)
+
+
+def has_fix(finding):
+    if finding.get("fixed_version"):
+        return True
+    return bool(finding.get("fixed_versions"))
+
+
+def filter_result(result):
+    findings = result.get("findings") or []
+    result["findings"] = [f for f in findings if has_fix(f)]
+
+
+if isinstance(doc.get("results"), list):
+    for result in doc["results"]:
+        if result:
+            filter_result(result)
+elif "findings" in doc:
+    filter_result(doc)
+
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
 fi
 
 echo "Wrote scan report to ${output_file}"
