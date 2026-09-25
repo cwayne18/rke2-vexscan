@@ -30,6 +30,82 @@ upstream [`contrib/vexscan-dashboard.py`](https://github.com/cwayne18/vexscan/bl
 - **`.github/scripts/generate_index.py`** builds `reports/html/index.html`, the
   landing page listing every run (styled after rke2-toolbox's index).
 - **`.github/workflows/deploy-pages.yml`** publishes `reports/html/` to GitHub Pages.
+- **`gen-rke2-vexscan`** builds a *fleet list* for a release — the image list
+  plus, per image, how RKE2 actually starts it. See below.
+
+## `gen-rke2-vexscan` — saying how each image is started
+
+`scan.sh --release` hands vexscan a bare list of image references, so every
+image is scanned as if its own `ENTRYPOINT` is what runs. For most of RKE2's
+images that is wrong, and wrong in the direction that costs you answers:
+
+| image | its config says | RKE2 actually runs |
+|---|---|---|
+| `hardened-flannel` | `CMD ["/bin/sh"]` | `/opt/bin/flanneld --ip-masq …` |
+| `hardened-etcd` | no ENTRYPOINT, no CMD | `etcd` |
+| `hardened-kubernetes` | no ENTRYPOINT, no CMD | four static pods |
+| `hardened-calico` | `CMD ["/bin/bash"]` | three canal containers |
+| `rke2-runtime` | no ENTRYPOINT, no CMD | not a pod at all — `/bin/*` on the host |
+
+vexscan roots its reachability closure on the command that runs, so an image
+whose declared command is `/bin/sh` gets a shell-entrypoint taint and rules out
+nothing. Telling it the truth is what `entrypoint=`, `cmd=` and `roots=` are for.
+
+If you have the cluster, ask the cluster — it knows what you configured:
+
+```sh
+kubectl get pods -A -o yaml | vexscan --images-from - --all --ecosystem os
+```
+
+For a release you have not installed, there is nothing to ask, so this script
+reconstructs the same facts from the release artifacts:
+
+```sh
+./gen-rke2-vexscan v1.37.1-rc1+rke2r1 -o rke2.txt
+vexscan --images-from rke2.txt --all --ecosystem os
+```
+
+Four sources, all pinned to the tag you name and all checkable:
+
+- the **image list**, from the release's `rke2-images*.linux-amd64.txt`;
+- the **addons**, from `rancher/rke2-runtime:<tag>`, which ships every bundled
+  Helm chart inline (base64 gzipped, in its `charts/*.yaml` HelmChart CRs), so
+  the charts are exactly the build that release deploys — rendered with
+  `helm template`, never fetched from a chart repo;
+- the **static pods**, from `pkg/podtemplate/spec.go` and `pkg/images/images.go`
+  at the tag, which is where `kube-apiserver`, `etcd` and friends get their
+  (bare) command names;
+- the **paths**, from the image layers, because a bare `etcd` has to be resolved
+  against a `PATH` a fleet list cannot see.
+
+It only names charts this image list actually deploys. The runtime image carries
+every chart RKE2 *can* install, including three mutually exclusive CNIs; a chart
+whose images are not in the selected lists is not this cluster's chart and
+contributes nothing. That is why `hardened-flannel` gets canal's command and not
+a union of canal's and standalone-flannel's.
+
+Two things it will not do:
+
+- **It never emits `exec-policy=`, `dlopen-policy=` or `dlopen-assume-none=`.**
+  Saying which program starts is not saying that program starts nothing, and
+  only someone who knows the workload can make the second claim. The generated
+  file carries a commented block about that instead.
+- **It never guesses a path.** A command it cannot resolve to a file that exists
+  in the image is written as a comment with no assertion: an unresolvable
+  `roots=` is a blocking taint in vexscan, and a *wrong* one that does resolve
+  quietly narrows the closure.
+
+Requirements: `python3` (stdlib + PyYAML) and `helm`. No Docker, no cluster.
+Registry blobs are cached under `~/.cache/rke2-vexscan/<tag>/`; `--no-cache`
+clears it first.
+
+```
+Usage: gen-rke2-vexscan <tag> [-o FILE] [--lists default,ingress-nginx]
+                              [--cache DIR] [--no-cache]
+```
+
+`--lists` selects which of the release's image lists to cover. The default is
+`default,ingress-nginx`, matching a default install with the bundled ingress.
 
 ## Running locally
 

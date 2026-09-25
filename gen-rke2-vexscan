@@ -1,0 +1,761 @@
+#!/usr/bin/env python3
+"""Generate a vexscan fleet list saying how an RKE2 release starts its images.
+
+    ./gen-rke2-vexscan v1.37.1-rc1+rke2r1 > rke2.txt
+
+Why this exists
+---------------
+`vexscan --images-from` can read a Kubernetes manifest and learn what each
+container is *actually* started with, which is the one thing the images
+themselves cannot say: a container's `command:` replaces the image's ENTRYPOINT,
+so the declared entrypoint never runs and neither does anything only it would
+have loaded. For a cluster you have, `kubectl get pods -A -o yaml | vexscan
+--images-from -` is the whole answer.
+
+For a release you have not installed yet, there is no cluster to ask. This
+script reconstructs the same information from the release artifacts:
+
+  the image list   from the GitHub release's rke2-images*.linux-amd64.txt
+  the addons       from rancher/rke2-runtime:<tag>, which ships every bundled
+                   Helm chart inline, base64 gzipped, in its charts/*.yaml
+                   HelmChart CRs -- pinned to the exact build that release uses
+  the static pods  from pkg/podtemplate/spec.go and pkg/images/images.go at the
+                   release tag, which is where kube-apiserver, etcd and friends
+                   get their (bare) command names
+  the paths        from the image layers themselves, because a bare command is
+                   resolved against a PATH a fleet list cannot see
+
+What it will not do
+-------------------
+It never emits `exec-policy=`, `dlopen-policy=` or `dlopen-assume-none=`.
+Saying which program starts is not saying that program starts nothing, and only
+a person who knows the workload can make the second claim. The generated file
+carries a commented block about that instead, and the numbers to decide with.
+
+It never guesses a path. A command it cannot resolve to a file that exists in
+the image is emitted as a comment and no assertion, because a `roots=` path
+that does not resolve is a blocking taint in vexscan and a *wrong* one that
+does resolve is a silently narrowed closure.
+
+Requirements: python3 (stdlib + PyYAML) and helm. No docker, no cluster.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import gzip
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import defaultdict
+from dataclasses import dataclass, field
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("error: PyYAML is required -- pip install pyyaml")
+
+GITHUB = "https://github.com/rancher/rke2"
+RAW = "https://raw.githubusercontent.com/rancher/rke2"
+REGISTRY = "https://registry-1.docker.io"
+AUTH = "https://auth.docker.io/token"
+
+ACCEPT = ",".join([
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.oci.image.index.v1+json",
+])
+
+
+def log(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def get(url: str, headers: dict | None = None, binary: bool = False):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        data = r.read()
+    return data if binary else data.decode()
+
+
+# --------------------------------------------------------------------------
+# Registry
+# --------------------------------------------------------------------------
+
+def norm(ref: str) -> str:
+    """Strip the Docker Hub default registry so chart and list refs compare."""
+    for p in ("index.docker.io/", "docker.io/", "registry-1.docker.io/"):
+        if ref.startswith(p):
+            return ref[len(p):]
+    return ref
+
+
+class Image:
+    """One image in the registry, fetched lazily and cached on disk."""
+
+    def __init__(self, ref: str, cache: str):
+        self.ref = norm(ref)
+        self.repo, _, self.tag = self.ref.partition(":")
+        self.cache = os.path.join(cache, self.ref.replace("/", "_").replace(":", "_"))
+        os.makedirs(self.cache, exist_ok=True)
+        self._token = None
+        self._config = None
+        self._files = None
+
+    @property
+    def token(self) -> str:
+        if self._token is None:
+            scope = urllib.parse.quote(f"repository:{self.repo}:pull", safe=":")
+            u = f"{AUTH}?service=registry.docker.io&scope={scope}"
+            self._token = json.loads(get(u))["token"]
+        return self._token
+
+    def _auth(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}", "Accept": ACCEPT}
+
+    def manifest(self) -> dict:
+        p = os.path.join(self.cache, "manifest.json")
+        if os.path.exists(p):
+            return json.load(open(p))
+        m = json.loads(get(f"{REGISTRY}/v2/{self.repo}/manifests/{self.tag}", self._auth()))
+        if "manifests" in m:  # multi-arch index: take linux/amd64
+            digest = next(
+                e["digest"] for e in m["manifests"]
+                if e.get("platform", {}).get("os") == "linux"
+                and e["platform"].get("architecture") == "amd64"
+            )
+            m = json.loads(get(f"{REGISTRY}/v2/{self.repo}/manifests/{digest}", self._auth()))
+        json.dump(m, open(p, "w"))
+        return m
+
+    def config(self) -> dict:
+        """The image config: ENTRYPOINT, CMD, Env."""
+        if self._config is None:
+            p = os.path.join(self.cache, "config.json")
+            if os.path.exists(p):
+                self._config = json.load(open(p))
+            else:
+                d = self.manifest()["config"]["digest"]
+                self._config = json.loads(get(f"{REGISTRY}/v2/{self.repo}/blobs/{d}", self._auth()))
+                json.dump(self._config, open(p, "w"))
+        return self._config.get("config", {})
+
+    def entrypoint(self) -> list[str]:
+        return self.config().get("Entrypoint") or []
+
+    def cmd(self) -> list[str]:
+        return self.config().get("Cmd") or []
+
+    def path_env(self) -> list[str]:
+        for e in self.config().get("Env") or []:
+            if e.startswith("PATH="):
+                return e[5:].split(":")
+        # The containerd/CRI default, which is what a container gets when the
+        # image config sets no PATH of its own.
+        return ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+
+    def blob(self, digest: str) -> bytes:
+        p = os.path.join(self.cache, digest.replace(":", "_"))
+        if not os.path.exists(p):
+            open(p, "wb").write(get(f"{REGISTRY}/v2/{self.repo}/blobs/{digest}", self._auth(), binary=True))
+        return open(p, "rb").read()
+
+    def files(self) -> set[str]:
+        """Absolute paths of regular files in the flattened filesystem.
+
+        Layers are applied in order and OCI whiteouts honoured, so a file an
+        upper layer deleted is not reported as present. Getting that wrong
+        would mean asserting a root that is not there, which vexscan would
+        (correctly) turn into a blocking missing-root taint.
+        """
+        if self._files is None:
+            present: set[str] = set()
+            for layer in self.manifest()["layers"]:
+                raw = self.blob(layer["digest"])
+                if layer["mediaType"].endswith("gzip") or raw[:2] == b"\x1f\x8b":
+                    raw = gzip.decompress(raw)
+                with tarfile.open(fileobj=io.BytesIO(raw)) as t:
+                    for m in t.getmembers():
+                        name = m.name.lstrip("./")
+                        base = os.path.basename(name)
+                        if base == ".wh..wh..opq":
+                            pref = os.path.dirname(name) + "/"
+                            present = {f for f in present if not f.startswith("/" + pref)}
+                        elif base.startswith(".wh."):
+                            gone = "/" + os.path.join(os.path.dirname(name), base[4:])
+                            present.discard(gone)
+                        elif m.isfile() or m.issym() or m.islnk():
+                            present.add("/" + name)
+            self._files = present
+        return self._files
+
+    def resolve(self, cmd: str) -> str | None:
+        """Turn a container command into an absolute path in this image.
+
+        A bare name (`kube-apiserver`, `start_runit`) is what RKE2's static
+        pods and the canal chart actually use; the kubelet resolves it against
+        the image's PATH at runtime. Resolving it here rather than passing the
+        bare name on is the difference between an assertion a reviewer can
+        check and one vexscan has to refuse.
+        """
+        if cmd.startswith("/"):
+            return cmd if cmd in self.files() else None
+        if "/" in cmd:  # relative with a slash: resolved against WorkingDir
+            wd = self.config().get("WorkingDir") or "/"
+            p = os.path.normpath(os.path.join(wd, cmd))
+            return p if p in self.files() else None
+        for d in self.path_env():
+            p = os.path.normpath(os.path.join(d, cmd))
+            if p in self.files():
+                return p
+        return None
+
+    def programs_in(self, prefix: str) -> list[str]:
+        return sorted(f for f in self.files() if f.startswith(prefix) and "/" not in f[len(prefix):])
+
+
+# --------------------------------------------------------------------------
+# Release artifacts
+# --------------------------------------------------------------------------
+
+def image_lists(tag: str, lists: list[str]) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """Fetch the release's image lists.
+
+    Returns (normalised refs, ref -> which list, ref -> the text the list used).
+    The last one matters: the generated file should name images exactly as the
+    release artifact does, so a reader can diff the two line by line, even
+    though everything here compares them with docker.io/ stripped.
+    """
+    refs, origin, spelling = [], {}, {}
+    for name in lists:
+        fn = "rke2-images.linux-amd64.txt" if name == "default" else f"rke2-images-{name}.linux-amd64.txt"
+        url = f"{GITHUB}/releases/download/{urllib.parse.quote(tag, safe='')}/{fn}"
+        try:
+            body = get(url)
+        except urllib.error.HTTPError as e:
+            sys.exit(f"error: {fn} for {tag}: HTTP {e.code} ({url})")
+        n = 0
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            r = norm(line)
+            if r not in origin:
+                refs.append(r)
+                origin[r] = fn
+                spelling[r] = line
+                n += 1
+        log(f"  {fn}: {n} image(s)")
+    return refs, origin, spelling
+
+
+def source_file(tag: str, path: str) -> str:
+    return get(f"{RAW}/{urllib.parse.quote(tag, safe='')}/{path}")
+
+
+def static_pods(tag: str) -> list[tuple[str, str]]:
+    """(command, image repo) for each RKE2 static pod, read from the source.
+
+    pkg/podtemplate/spec.go has one constructor per static pod, each of the
+    shape `c.resolveAndPull(images.KubeAPIServer)` ... `Command: "kube-apiserver"`,
+    and podtemplate.go puts that Command straight into the container's command
+    with no path. pkg/images/images.go maps the key to a repository, in a
+    switch and a block of Default*Image vars. Both are parsed rather than
+    hardcoded here so that a static pod added in a later release shows up
+    instead of being silently missing.
+    """
+    spec = source_file(tag, "pkg/podtemplate/spec.go")
+    imgs = source_file(tag, "pkg/images/images.go")
+
+    defaults = dict(re.findall(r'(\w+)\s*=\s*"(rancher/[\w.-]+)"', imgs))
+    key_to_var: dict[str, str] = {}
+    m = re.search(r"func getDefaultImage\([\s\S]*?\n}", imgs)
+    if m:
+        for keys, var in re.findall(r"case ([\w,\s]+):\s*\n\s*s = (\w+)", m.group(0)):
+            for k in (x.strip() for x in keys.split(",")):
+                key_to_var[k] = var
+
+    out = []
+    for key, cmd in re.findall(r"resolveAndPull\(images\.(\w+)\)[\s\S]{0,800}?Command:\s+\"([^\"]+)\"", spec):
+        repo = defaults.get(key_to_var.get(key, ""), "")
+        if repo:
+            out.append((cmd, repo))
+    return out
+
+
+def bundled_charts(runtime: Image, workdir: str) -> dict[str, str]:
+    """Extract every inline Helm chart from rke2-runtime. Returns name -> tgz path."""
+    out = {}
+    d = os.path.join(workdir, "charts")
+    os.makedirs(d, exist_ok=True)
+    for layer in runtime.manifest()["layers"]:
+        raw = runtime.blob(layer["digest"])
+        if layer["mediaType"].endswith("gzip") or raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        with tarfile.open(fileobj=io.BytesIO(raw)) as t:
+            for m in t.getmembers():
+                if not (m.isfile() and m.name.lstrip("./").startswith("charts/") and m.name.endswith(".yaml")):
+                    continue
+                try:
+                    doc = yaml.safe_load(t.extractfile(m).read())
+                except yaml.YAMLError:
+                    continue
+                if not isinstance(doc, dict) or doc.get("kind") != "HelmChart":
+                    continue
+                content = (doc.get("spec") or {}).get("chartContent")
+                if not content:
+                    continue
+                name = doc["metadata"]["name"]
+                p = os.path.join(d, f"{name}.tgz")
+                open(p, "wb").write(base64.b64decode(content))
+                out[name] = p
+    return out
+
+
+def chart_images(tgz: str) -> set[str]:
+    """Image references a chart's default values.yaml names.
+
+    Cheap and approximate on purpose -- it exists only to decide whether a
+    chart is worth rendering. Anything it misses is caught by the post-render
+    scope check, which works on what the chart actually emitted.
+    """
+    out: set[str] = set()
+    try:
+        with tarfile.open(tgz) as t:
+            m = next((x for x in t.getmembers() if x.name.count("/") == 1
+                      and x.name.endswith("/values.yaml")), None)
+            if not m:
+                return out
+            vals = yaml.safe_load(t.extractfile(m).read()) or {}
+    except (tarfile.TarError, yaml.YAMLError, OSError):
+        return out
+
+    def walk(o):
+        if isinstance(o, dict):
+            repo, tag_ = o.get("repository"), o.get("tag")
+            if isinstance(repo, str) and isinstance(tag_, str):
+                out.add(norm(f"{repo}:{tag_}"))
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(vals)
+    return out
+
+
+def kube_version(tag: str) -> str:
+    m = re.match(r"(v\d+\.\d+\.\d+)", tag)
+    return m.group(1) if m else "v1.30.0"
+
+
+# What rke2 injects into every chart it applies, via the
+# `rke2.cattle.io/inject-cluster-config: "true"` annotation on the HelmChart CR.
+# Several charts fail to render without them (rke2-coredns wants
+# global.clusterDNS as a string and dies on the empty default).
+#
+# These are the stock values. They are all networking: none of them can change
+# which program a container is started with, which is the only thing read out of
+# the rendered output -- so a cluster configured with a different service CIDR
+# still gets the same answer out of this script.
+CLUSTER_CONFIG = {
+    "global.clusterCIDR": "10.42.0.0/16",
+    "global.clusterCIDRv4": "10.42.0.0/16",
+    "global.clusterDNS": "10.43.0.10",
+    "global.clusterDomain": "cluster.local",
+    "global.serviceCIDR": "10.43.0.0/16",
+    "global.rke2DataDir": "/var/lib/rancher/rke2",
+    "global.systemDefaultRegistry": "",
+}
+
+
+def render(name: str, tgz: str, kubever: str) -> tuple[list[dict], str | None]:
+    """helm template one chart. Returns (containers, error)."""
+    cmd = ["helm", "template", name, tgz, "--namespace", "kube-system", "--kube-version", kubever]
+    for k, v in CLUSTER_CONFIG.items():
+        cmd += ["--set-string", f"{k}={v}"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [], str(e)
+    if out.returncode != 0:
+        return [], (out.stderr.strip().splitlines() or ["helm template failed"])[0]
+
+    found: list[dict] = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k in ("initContainers", "containers"):
+                for c in o.get(k) or []:
+                    if isinstance(c, dict) and c.get("image"):
+                        found.append(c)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    try:
+        for doc in yaml.safe_load_all(out.stdout):
+            if doc:
+                walk(doc)
+    except yaml.YAMLError as e:
+        return [], f"rendered YAML did not parse: {e}"
+    return found, None
+
+
+# --------------------------------------------------------------------------
+# Model
+# --------------------------------------------------------------------------
+
+@dataclass
+class Start:
+    """One way one image is started."""
+    command: list[str]
+    args: list[str]
+    where: str            # human-readable provenance
+    resolved: str | None  # absolute path of command[0], or None
+
+
+@dataclass
+class Entry:
+    ref: str
+    origin: str
+    spelling: str
+    starts: list[Start] = field(default_factory=list)
+    note: str = ""
+
+
+def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[str, str],
+            cache: str, workdir: str) -> list[Entry]:
+    entries = {r: Entry(ref=r, origin=origin[r], spelling=spelling[r]) for r in refs}
+    images: dict[str, Image] = {}
+
+    def img(ref: str) -> Image:
+        if ref not in images:
+            images[ref] = Image(ref, cache)
+        return images[ref]
+
+    # -- addons, from the charts the release actually ships -----------------
+    runtime = next((r for r in refs if norm(r).startswith("rancher/rke2-runtime")), None)
+    if not runtime:
+        sys.exit("error: the image list has no rancher/rke2-runtime; cannot read the bundled charts")
+
+    log(f"reading bundled charts from {runtime} ...")
+    charts = bundled_charts(img(runtime), workdir)
+    log(f"  {len(charts)} chart(s) shipped in the runtime image")
+
+    kubever = kube_version(tag)
+    for name in sorted(charts):
+        # Scope, before rendering: the runtime image ships every chart RKE2
+        # *can* deploy, including three mutually exclusive CNIs and several
+        # cloud providers. The selected image lists are what says which of them
+        # this install actually uses, so a chart none of whose images are in
+        # those lists is not this cluster's chart and must not contribute a
+        # command. Pre-filtering on the chart's own values.yaml also keeps a
+        # chart that cannot render without site-specific values (vsphere wants
+        # a vCenter cluster id) from being reported as a failure it is not.
+        wanted = chart_images(charts[name])
+        if wanted and not (wanted & set(entries)):
+            continue
+
+        containers, err = render(name, charts[name], kubever)
+        if err:
+            log(f"  {name}: SKIPPED ({err})")
+            continue
+
+        rendered = {norm(c["image"]) for c in containers}
+        if rendered and not rendered <= set(entries):
+            # Scope again, after rendering, on what the chart really deploys.
+            # rke2-flannel and rke2-canal both run hardened-flannel, but only
+            # rke2-flannel also runs hardened-cni-plugins -- which the default
+            # image list does not contain. Without this the standalone-flannel
+            # command would be merged into canal's and hardened-flannel would
+            # get a roots= union of two deployments, only one of which exists.
+            log(f"  {name}: not deployed by this image list "
+                f"({', '.join(sorted(rendered - set(entries)))} absent)")
+            continue
+
+        for c in containers:
+            ref = norm(c["image"])
+            cmd = list(c.get("command") or [])
+            args = list(c.get("args") or [])
+            if not cmd:
+                continue  # the image's own entrypoint runs; nothing to assert
+            entries[ref].starts.append(Start(
+                cmd, args, f"{name} chart, container {c.get('name', '?')}",
+                img(ref).resolve(cmd[0]),
+            ))
+
+    # -- static pods, from the release source -------------------------------
+    log("reading static pod commands from the release source ...")
+    for cmd, repo in static_pods(tag):
+        ref = next((r for r in refs if norm(r).split(":")[0] == repo), None)
+        if not ref:
+            continue
+        entries[ref].starts.append(Start(
+            [cmd], [], f"static pod {cmd} (pkg/podtemplate/spec.go)", img(ref).resolve(cmd),
+        ))
+
+    # -- the runtime image is never a pod -----------------------------------
+    rt = entries[runtime]
+    bins = img(runtime).programs_in("/bin/")
+    rt.note = ("not run as a pod at all -- rke2 extracts its /bin onto the host and the "
+               "host runs those binaries, so the roots are the binaries themselves")
+    for b in bins:
+        rt.starts.append(Start([b], [], "extracted to the host by rke2", b))
+
+    return [entries[r] for r in refs]
+
+
+# --------------------------------------------------------------------------
+# Emit
+# --------------------------------------------------------------------------
+
+def shell_safe(tok: str) -> bool:
+    """A fleet-list line is split on whitespace, so a token with a space in it
+    cannot be written there at all. vexscan refuses such a line rather than
+    truncating it; we refuse to generate one."""
+    return tok != "" and not any(c.isspace() for c in tok) and "#" not in tok
+
+
+def emit(tag: str, lists: list[str], entries: list[Entry], cache: str, out) -> dict:
+    stats = defaultdict(int)
+    images = {e.ref: Image(e.ref, cache) for e in entries}
+
+    def w(s=""):
+        print(s, file=out)
+
+    w("# " + "-" * 73)
+    w(f"# rke2.txt -- how RKE2 {tag} starts the images in its")
+    w(f"#   {', '.join(lists)}")
+    w("# image list(s). Written for `vexscan --images-from`.")
+    w("#")
+    w("# GENERATED by gen-rke2-vexscan. Do not hand-edit the assertion lines; edit")
+    w("# the generator and re-run, or append your own policy keys (see the bottom).")
+    w("#")
+    w("# Derived from, and checkable against:")
+    w("#   - each image's own config ENTRYPOINT/CMD, read from the registry")
+    w("#   - the Helm charts shipped inline in rancher/rke2-runtime:<tag>, which are")
+    w("#     pinned to the exact build this release deploys")
+    w("#   - pkg/podtemplate/spec.go and pkg/images/images.go at the release tag")
+    w("#   - the image layers, to resolve bare commands and confirm every path exists")
+    w("#")
+    w("# If you have the cluster, prefer asking it -- it knows what you configured:")
+    w("#   kubectl get pods -A -o yaml | vexscan --images-from -")
+    w("# " + "-" * 73)
+    w()
+
+    single, multi, plain, unresolved = [], [], [], []
+    for e in entries:
+        if e.note:
+            multi.append(e)
+        elif not e.starts:
+            plain.append(e)
+        elif any(s.resolved is None for s in e.starts):
+            unresolved.append(e)
+        elif len({(tuple(s.command), tuple(s.args)) for s in e.starts}) == 1:
+            single.append(e)
+        else:
+            multi.append(e)
+
+    def config_comment(e: Entry) -> str:
+        im = images[e.ref]
+        ep, cm = im.entrypoint(), im.cmd()
+        if ep or cm:
+            return " ".join(ep + cm)
+        return "no ENTRYPOINT and no CMD"
+
+    if plain:
+        w("# " + "-" * 73)
+        w("# Images whose own config already names the program they run.")
+        w("#")
+        w("# No assertion needed and none given: vexscan reads the ENTRYPOINT/CMD from")
+        w("# the image config and roots on that. A line repeating it would assert")
+        w("# nothing new and could go stale.")
+        w("# " + "-" * 73)
+        for e in plain:
+            stats["plain"] += 1
+            w(f"{e.spelling}  # {config_comment(e)}")
+        w()
+
+    if single:
+        w("# " + "-" * 73)
+        w("# Images RKE2 starts differently from what their config declares.")
+        w("#")
+        w("# entrypoint= REPLACES the ENTRYPOINT the image declares, which is what the")
+        w("# container runtime does and what --roots cannot express: --roots adds a")
+        w("# root and leaves the declared entrypoint rooted beside it.")
+        w("# " + "-" * 73)
+        for e in single:
+            stats["single"] += 1
+            s = e.starts[0]
+            toks = [f"entrypoint={s.resolved}"] + [f"entrypoint={t}" for t in s.command[1:]]
+            toks += [f"cmd={t}" for t in s.args]
+            # Before the clearing token below, which is bare `cmd=` on purpose
+            # and would read as an unwritable empty argv token.
+            bad = [t for t in toks if not shell_safe(t.split("=", 1)[1])]
+            if not s.args and images[e.ref].cmd():
+                # Kubernetes drops the image's CMD when a container sets
+                # `command:` and no `args:` -- only the supplied command runs.
+                # vexscan keeps an unset cmd= and an empty one apart for exactly
+                # this reason, so say the empty one. Without it the declared CMD
+                # is appended and the report describes a command line that never
+                # runs: canal's flanneld would be shown ending in /bin/sh.
+                toks.append("cmd=")
+            w()
+            w(f"# {s.where}")
+            w(f"#   config declares: {config_comment(e)}")
+            if s.command[0] != s.resolved:
+                w(f"#   command is the bare name {s.command[0]!r}, resolved against the image PATH")
+            if bad:
+                stats["unwritable"] += 1
+                w(f"# NOT WRITTEN: {bad} contains whitespace, which a fleet-list line cannot")
+                w("#   carry. Use the --entrypoint/--cmd flags for this image on its own run.")
+                w(f"# {e.spelling}")
+            else:
+                w(f"{e.spelling} {' '.join(toks)}")
+        w()
+
+    if multi:
+        w("# " + "-" * 73)
+        w("# Images this release starts more than one way. These get roots=, not")
+        w("# entrypoint=.")
+        w("#")
+        w("# entrypoint= says \"this image is started with this one command\", which is")
+        w("# false here -- and saying it twice is an error vexscan refuses (\"named twice")
+        w("# with different assertions; say it once\"). roots= names every starting")
+        w("# point and the closure is their union: a superset of any single container's,")
+        w("# so it still fails closed.")
+        w("# " + "-" * 73)
+        for e in multi:
+            stats["multi"] += 1
+            w()
+            if e.note:
+                w(f"# {e.note}")
+            for s in e.starts:
+                shown = " ".join(s.command + s.args)
+                w(f"#   {s.where}: {shown}")
+            w(f"#   config declares: {config_comment(e)}")
+            good = [s.resolved for s in e.starts if s.resolved]
+            missing = [s.command[0] for s in e.starts if not s.resolved]
+            if missing:
+                stats["unresolved"] += 1
+                w(f"# NOT WRITTEN: could not resolve {missing} to a file in this image.")
+                w("#   An unresolvable roots= path is a blocking taint in vexscan, and a")
+                w("#   wrong one that does resolve silently narrows the closure, so this")
+                w("#   line is left bare rather than guessed.")
+                w(f"{e.spelling}")
+            else:
+                w(f"{e.spelling} roots={','.join(sorted(set(good)))}")
+        w()
+
+    if unresolved:
+        w("# " + "-" * 73)
+        w("# Images whose command could not be resolved to a path in the image.")
+        w("#")
+        w("# Left bare on purpose. Resolve them by hand and add the key yourself, or")
+        w("# fix the generator -- do not guess: a roots= that does not resolve is a")
+        w("# blocking taint, and one that resolves to the wrong file quietly narrows")
+        w("# the closure, which is the failure that does not announce itself.")
+        w("# " + "-" * 73)
+        for e in unresolved:
+            stats["unresolved"] += 1
+            w()
+            for s in e.starts:
+                mark = "" if s.resolved else "   <-- unresolved"
+                w(f"#   {s.where}: {' '.join(s.command + s.args)}{mark}")
+            w(f"{e.spelling}")
+        w()
+
+    w("# " + "-" * 73)
+    w("# What this generator will not decide for you.")
+    w("#")
+    w("# exec-policy=assume-none is the key that actually moves findings, and it is a")
+    w("# claim nothing above is evidence for: \"the program named here never starts")
+    w("# another one\". Add it per line, only where you believe it. Anything that is a")
+    w("# supervisor (runit, tini, catatonit, s6) or a shell script is a no.")
+    w("#")
+    w("# Run without it first and read the exec-taint evidence -- vexscan names the")
+    w("# symbols that made it suspect the binary can exec. A binary that links none of")
+    w("# them needs no assertion at all.")
+    w("#")
+    w("# Say it once with a profile rather than on every line:")
+    w("#")
+    w("#   [profile single-binary] exec-policy=assume-none")
+    w("#   <image>  profile=single-binary")
+    w("#")
+    w("# The name travels into the report and the emitted VEX -- \"under the asserted")
+    w("# runtime profile 'single-binary'\" -- so a reviewer can look it up and disagree.")
+    w("# " + "-" * 73)
+    return stats
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Generate a vexscan fleet list for an RKE2 release.",
+        epilog="example: ./gen-rke2-vexscan v1.37.1-rc1+rke2r1 -o rke2.txt",
+    )
+    ap.add_argument("tag", help="RKE2 release tag, e.g. v1.37.1-rc1+rke2r1")
+    ap.add_argument("-o", "--output", help="write here instead of stdout")
+    ap.add_argument(
+        "--lists", default="default,ingress-nginx",
+        help="comma-separated release image lists: 'default' is "
+             "rke2-images.linux-amd64.txt, anything else NAME is "
+             "rke2-images-NAME.linux-amd64.txt (default: %(default)s)",
+    )
+    ap.add_argument("--cache", default=os.path.expanduser("~/.cache/rke2-vexscan"),
+                    help="where to keep downloaded layers (default: %(default)s)")
+    ap.add_argument("--no-cache", action="store_true", help="delete the cache first")
+    args = ap.parse_args()
+
+    if not shutil.which("helm"):
+        return log("error: helm is required and was not found on PATH") or 1
+
+    if args.no_cache and os.path.isdir(args.cache):
+        shutil.rmtree(args.cache)
+    cache = os.path.join(args.cache, args.tag.replace("/", "_"))
+    os.makedirs(cache, exist_ok=True)
+    workdir = os.path.join(cache, "work")
+    os.makedirs(workdir, exist_ok=True)
+
+    lists = [x.strip() for x in args.lists.split(",") if x.strip()]
+    log(f"RKE2 {args.tag}")
+    refs, origin, spelling = image_lists(args.tag, lists)
+    log(f"  {len(refs)} image(s) total")
+
+    entries = collect(args.tag, refs, origin, spelling, cache, workdir)
+
+    out = open(args.output, "w") if args.output else sys.stdout
+    try:
+        stats = emit(args.tag, lists, entries, cache, out)
+    finally:
+        if args.output:
+            out.close()
+
+    log("")
+    log(f"  {stats['plain']} image(s) need no assertion (config names the program)")
+    log(f"  {stats['single']} got entrypoint=/cmd=")
+    log(f"  {stats['multi']} got roots= (started more than one way)")
+    if stats["unresolved"]:
+        log(f"  {stats['unresolved']} left bare: a command did not resolve to a path")
+    if stats["unwritable"]:
+        log(f"  {stats['unwritable']} left bare: an argv token contains whitespace")
+    if args.output:
+        log(f"\nwrote {args.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
