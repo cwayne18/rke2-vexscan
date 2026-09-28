@@ -8,9 +8,9 @@
 #
 # Derived from, and checkable against:
 #   - each image's own config ENTRYPOINT/CMD, read from the registry
-#   - the Helm charts shipped inline in rancher/rke2-runtime:<tag>, which are
-#     pinned to the exact build this release deploys
-#   - pkg/podtemplate/spec.go and pkg/images/images.go at the release tag
+#   - the Helm charts pinned in charts/chart_versions.yaml at that ref, fetched
+#     from the same URL scripts/build-chart.sh uses to build them
+#   - pkg/podtemplate/spec.go and pkg/images/images.go at that ref
 #   - the image layers, to resolve bare commands and confirm every path exists
 #
 # If you have the cluster, prefer asking it -- it knows what you configured:

@@ -3,6 +3,10 @@
 
     ./gen-rke2-vexscan v1.37.1-rc1+rke2r1 > rke2.txt
 
+    # or, for a branch/commit that has never been released (no GitHub release
+    # assets, no pushed rke2-runtime image to read charts from):
+    ./gen-rke2-vexscan master --images-from images.txt > fleet.txt
+
 Why this exists
 ---------------
 `vexscan --images-from` can read a Kubernetes manifest and learn what each
@@ -12,15 +16,18 @@ so the declared entrypoint never runs and neither does anything only it would
 have loaded. For a cluster you have, `kubectl get pods -A -o yaml | vexscan
 --images-from -` is the whole answer.
 
-For a release you have not installed yet, there is no cluster to ask. This
-script reconstructs the same information from the release artifacts:
+For a release (or branch) you have not installed, there is no cluster to ask.
+This script reconstructs the same information from the source tree and the
+image registry:
 
-  the image list   from the GitHub release's rke2-images*.linux-amd64.txt
-  the addons       from rancher/rke2-runtime:<tag>, which ships every bundled
-                   Helm chart inline, base64 gzipped, in its charts/*.yaml
-                   HelmChart CRs -- pinned to the exact build that release uses
+  the image list   from the GitHub release's rke2-images*.linux-amd64.txt, or
+                   from a local file (--images-from) for a ref with no release
+  the addons       from charts/chart_versions.yaml at the ref, fetched from the
+                   same pinned https://rke2-charts.rancher.io/assets/... URL
+                   scripts/build-chart.sh uses -- so this needs no pushed
+                   rke2-runtime image and works the same for a branch as a tag
   the static pods  from pkg/podtemplate/spec.go and pkg/images/images.go at the
-                   release tag, which is where kube-apiserver, etcd and friends
+                   ref, which is where kube-apiserver, etcd and friends
                    get their (bare) command names
   the paths        from the image layers themselves, because a bare command is
                    resolved against a PATH a fleet list cannot see
@@ -43,7 +50,6 @@ Requirements: python3 (stdlib + PyYAML) and helm. No docker, no cluster.
 from __future__ import annotations
 
 import argparse
-import base64
 import gzip
 import io
 import json
@@ -68,6 +74,8 @@ GITHUB = "https://github.com/rancher/rke2"
 RAW = "https://raw.githubusercontent.com/rancher/rke2"
 REGISTRY = "https://registry-1.docker.io"
 AUTH = "https://auth.docker.io/token"
+# Same default scripts/build-chart.sh in the rke2 repo uses (CHART_REPO).
+CHART_REPO = "https://rke2-charts.rancher.io"
 
 ACCEPT = ",".join([
     "application/vnd.docker.distribution.manifest.v2+json",
@@ -82,7 +90,11 @@ def log(msg: str) -> None:
 
 
 def get(url: str, headers: dict | None = None, binary: bool = False):
-    req = urllib.request.Request(url, headers=headers or {})
+    # rke2-charts.rancher.io sits behind Cloudflare, which 403s the default
+    # Python-urllib/x.y User-Agent outright; send a plain browser-ish one.
+    req_headers = {"User-Agent": "gen-rke2-vexscan"}
+    req_headers.update(headers or {})
+    req = urllib.request.Request(url, headers=req_headers)
     with urllib.request.urlopen(req, timeout=120) as r:
         data = r.read()
     return data if binary else data.decode()
@@ -259,6 +271,32 @@ def image_lists(tag: str, lists: list[str]) -> tuple[list[str], dict[str, str], 
     return refs, origin, spelling
 
 
+def local_images(path: str) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """Read an image list already on disk, e.g. the images.txt scan.sh builds
+    from source for a branch that has no GitHub release to download from.
+
+    Same shape and the same rules as image_lists(): blank lines and comments
+    are skipped, and the spelling is kept verbatim so the emitted line names
+    the image exactly as the caller's list did.
+    """
+    refs, origin, spelling = [], {}, {}
+    name = os.path.basename(path)
+    n = 0
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            r = norm(line)
+            if r not in origin:
+                refs.append(r)
+                origin[r] = name
+                spelling[r] = line
+                n += 1
+    log(f"  {name}: {n} image(s)")
+    return refs, origin, spelling
+
+
 def source_file(tag: str, path: str) -> str:
     return get(f"{RAW}/{urllib.parse.quote(tag, safe='')}/{path}")
 
@@ -293,32 +331,39 @@ def static_pods(tag: str) -> list[tuple[str, str]]:
     return out
 
 
-def bundled_charts(runtime: Image, workdir: str) -> dict[str, str]:
-    """Extract every inline Helm chart from rke2-runtime. Returns name -> tgz path."""
+def release_charts(tag: str, workdir: str, chart_repo: str) -> dict[str, str]:
+    """Fetch every Helm chart RKE2 bundles at this ref. Returns name -> tgz path.
+
+    Reads charts/chart_versions.yaml at the ref -- present in the source tree
+    for any tag or branch, released or not -- and downloads each chart tarball
+    from the exact pinned URL scripts/build-chart.sh fetches it from at build
+    time. That URL is versioned (.../assets/<package>/<name>-<version>.tgz), so
+    this is the same artifact the build used, not "whatever a chart repo serves
+    today", without needing a pushed rke2-runtime image to read it back out of.
+    A chart pinned to version 0.0.0 has been removed and ships nothing.
+    """
+    doc = yaml.safe_load(source_file(tag, "charts/chart_versions.yaml")) or {}
     out = {}
     d = os.path.join(workdir, "charts")
     os.makedirs(d, exist_ok=True)
-    for layer in runtime.manifest()["layers"]:
-        raw = runtime.blob(layer["digest"])
-        if layer["mediaType"].endswith("gzip") or raw[:2] == b"\x1f\x8b":
-            raw = gzip.decompress(raw)
-        with tarfile.open(fileobj=io.BytesIO(raw)) as t:
-            for m in t.getmembers():
-                if not (m.isfile() and m.name.lstrip("./").startswith("charts/") and m.name.endswith(".yaml")):
-                    continue
-                try:
-                    doc = yaml.safe_load(t.extractfile(m).read())
-                except yaml.YAMLError:
-                    continue
-                if not isinstance(doc, dict) or doc.get("kind") != "HelmChart":
-                    continue
-                content = (doc.get("spec") or {}).get("chartContent")
-                if not content:
-                    continue
-                name = doc["metadata"]["name"]
-                p = os.path.join(d, f"{name}.tgz")
-                open(p, "wb").write(base64.b64decode(content))
-                out[name] = p
+    for entry in doc.get("charts") or []:
+        filename = entry.get("filename") or ""
+        version = str(entry.get("version") or "0.0.0")
+        name = os.path.basename(filename)
+        if name.endswith(".yaml"):
+            name = name[: -len(".yaml")]
+        if not name or version == "0.0.0":
+            continue
+        package = entry.get("package") or (name[: -len("-crd")] if name.endswith("-crd") else name)
+        url = f"{chart_repo}/assets/{package}/{name}-{version}.tgz"
+        try:
+            data = get(url, binary=True)
+        except urllib.error.HTTPError as e:
+            log(f"  {name}: SKIPPED (HTTP {e.code} fetching {url})")
+            continue
+        p = os.path.join(d, f"{name}.tgz")
+        open(p, "wb").write(data)
+        out[name] = p
     return out
 
 
@@ -438,7 +483,7 @@ class Entry:
 
 
 def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[str, str],
-            cache: str, workdir: str) -> list[Entry]:
+            cache: str, workdir: str, chart_repo: str) -> list[Entry]:
     entries = {r: Entry(ref=r, origin=origin[r], spelling=spelling[r]) for r in refs}
     images: dict[str, Image] = {}
 
@@ -447,18 +492,19 @@ def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[st
             images[ref] = Image(ref, cache)
         return images[ref]
 
-    # -- addons, from the charts the release actually ships -----------------
+    # -- addons, from the charts this ref actually ships ---------------------
+    # rke2-runtime need not be in the image list at all: build-from-source
+    # scans drop it because its dev tag is never pushed to a registry, and the
+    # charts below no longer come from reading it back out of that image.
     runtime = next((r for r in refs if norm(r).startswith("rancher/rke2-runtime")), None)
-    if not runtime:
-        sys.exit("error: the image list has no rancher/rke2-runtime; cannot read the bundled charts")
 
-    log(f"reading bundled charts from {runtime} ...")
-    charts = bundled_charts(img(runtime), workdir)
-    log(f"  {len(charts)} chart(s) shipped in the runtime image")
+    log(f"reading chart_versions.yaml at {tag} ...")
+    charts = release_charts(tag, workdir, chart_repo)
+    log(f"  {len(charts)} chart(s) bundled at this ref")
 
     kubever = kube_version(tag)
     for name in sorted(charts):
-        # Scope, before rendering: the runtime image ships every chart RKE2
+        # Scope, before rendering: chart_versions.yaml pins every chart RKE2
         # *can* deploy, including three mutually exclusive CNIs and several
         # cloud providers. The selected image lists are what says which of them
         # this install actually uses, so a chart none of whose images are in
@@ -508,13 +554,14 @@ def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[st
             [cmd], [], f"static pod {cmd} (pkg/podtemplate/spec.go)", img(ref).resolve(cmd),
         ))
 
-    # -- the runtime image is never a pod -----------------------------------
-    rt = entries[runtime]
-    bins = img(runtime).programs_in("/bin/")
-    rt.note = ("not run as a pod at all -- rke2 extracts its /bin onto the host and the "
-               "host runs those binaries, so the roots are the binaries themselves")
-    for b in bins:
-        rt.starts.append(Start([b], [], "extracted to the host by rke2", b))
+    # -- the runtime image is never a pod, if it is even in the list --------
+    if runtime:
+        rt = entries[runtime]
+        bins = img(runtime).programs_in("/bin/")
+        rt.note = ("not run as a pod at all -- rke2 extracts its /bin onto the host and the "
+                   "host runs those binaries, so the roots are the binaries themselves")
+        for b in bins:
+            rt.starts.append(Start([b], [], "extracted to the host by rke2", b))
 
     return [entries[r] for r in refs]
 
@@ -547,9 +594,9 @@ def emit(tag: str, lists: list[str], entries: list[Entry], cache: str, out) -> d
     w("#")
     w("# Derived from, and checkable against:")
     w("#   - each image's own config ENTRYPOINT/CMD, read from the registry")
-    w("#   - the Helm charts shipped inline in rancher/rke2-runtime:<tag>, which are")
-    w("#     pinned to the exact build this release deploys")
-    w("#   - pkg/podtemplate/spec.go and pkg/images/images.go at the release tag")
+    w("#   - the Helm charts pinned in charts/chart_versions.yaml at that ref, fetched")
+    w("#     from the same URL scripts/build-chart.sh uses to build them")
+    w("#   - pkg/podtemplate/spec.go and pkg/images/images.go at that ref")
     w("#   - the image layers, to resolve bare commands and confirm every path exists")
     w("#")
     w("# If you have the cluster, prefer asking it -- it knows what you configured:")
@@ -704,17 +751,32 @@ def emit(tag: str, lists: list[str], entries: list[Entry], cache: str, out) -> d
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Generate a vexscan fleet list for an RKE2 release.",
-        epilog="example: ./gen-rke2-vexscan v1.37.1-rc1+rke2r1 -o rke2.txt",
+        description="Generate a vexscan fleet list for an RKE2 release or branch.",
+        epilog="examples:\n"
+               "  ./gen-rke2-vexscan v1.37.1-rc1+rke2r1 -o rke2.txt\n"
+               "  ./gen-rke2-vexscan master --images-from images.txt -o fleet.txt",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("tag", help="RKE2 release tag, e.g. v1.37.1-rc1+rke2r1")
+    ap.add_argument("tag", help="RKE2 release tag (e.g. v1.37.1-rc1+rke2r1) or branch "
+                                 "(e.g. master); used to read chart_versions.yaml, "
+                                 "pkg/podtemplate/spec.go and pkg/images/images.go")
     ap.add_argument("-o", "--output", help="write here instead of stdout")
+    ap.add_argument(
+        "--images-from",
+        help="read the image list from this local file instead of downloading the "
+             "release's rke2-images*.linux-amd64.txt -- for a branch/commit with no "
+             "GitHub release. Disables --lists.",
+    )
     ap.add_argument(
         "--lists", default="default,ingress-nginx",
         help="comma-separated release image lists: 'default' is "
              "rke2-images.linux-amd64.txt, anything else NAME is "
-             "rke2-images-NAME.linux-amd64.txt (default: %(default)s)",
+             "rke2-images-NAME.linux-amd64.txt (default: %(default)s). "
+             "Ignored when --images-from is given.",
     )
+    ap.add_argument("--chart-repo", default=CHART_REPO,
+                    help="where scripts/build-chart.sh's chart tarballs are hosted "
+                         "(default: %(default)s)")
     ap.add_argument("--cache", default=os.path.expanduser("~/.cache/rke2-vexscan"),
                     help="where to keep downloaded layers (default: %(default)s)")
     ap.add_argument("--no-cache", action="store_true", help="delete the cache first")
@@ -730,12 +792,16 @@ def main() -> int:
     workdir = os.path.join(cache, "work")
     os.makedirs(workdir, exist_ok=True)
 
-    lists = [x.strip() for x in args.lists.split(",") if x.strip()]
     log(f"RKE2 {args.tag}")
-    refs, origin, spelling = image_lists(args.tag, lists)
+    if args.images_from:
+        lists = [os.path.basename(args.images_from)]
+        refs, origin, spelling = local_images(args.images_from)
+    else:
+        lists = [x.strip() for x in args.lists.split(",") if x.strip()]
+        refs, origin, spelling = image_lists(args.tag, lists)
     log(f"  {len(refs)} image(s) total")
 
-    entries = collect(args.tag, refs, origin, spelling, cache, workdir)
+    entries = collect(args.tag, refs, origin, spelling, cache, workdir, args.chart_repo)
 
     out = open(args.output, "w") if args.output else sys.stdout
     try:

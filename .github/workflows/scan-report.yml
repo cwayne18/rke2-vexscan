@@ -52,6 +52,10 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Install PyYAML and helm
+        uses: azure/setup-helm@v4
+      - run: pip install pyyaml
+
       - name: Fetch vexscan-dashboard.py
         run: |
           curl -fsSL \
