@@ -7,3 +7,4 @@ __pycache__/
 # Generated scan artifacts (intermediate, not committed)
 /scan.json
 /images.txt
+/fleet.txt

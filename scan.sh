@@ -8,10 +8,18 @@
 #   * --release <version>: scan the published rke2-images list straight from the
 #     GitHub release, handing vexscan the URL directly.
 #
+# In both modes, ./gen-rke2-vexscan turns the bare image list into a fleet list
+# (entrypoint=/roots= assertions saying how RKE2 actually starts each image,
+# not just what its own config declares) before handing it to vexscan. If
+# python3, PyYAML or helm are missing, or generation fails for any reason, the
+# scan falls back to the bare image list with a warning rather than aborting.
+#
 # vexscan does its own triage and VEX resolution, so the output JSON is fed to
 # contrib/vexscan-dashboard.py to render the HTML pages.
 
 set -o pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 output_file="scan.json"
 branch=""
@@ -293,11 +301,87 @@ fetch_runtime_layout() {
     return 0
 }
 
-rm -f "$output_file"
+# generate_fleet_list runs ./gen-rke2-vexscan for $1 (a release tag or branch)
+# against the image list already on disk at $2, or against the release's own
+# --lists $3 when $2 is empty, and prints the fleet-list path on success.
+# On any failure -- missing python3/PyYAML/helm, network trouble, a chart
+# that won't render, whatever -- it warns on stderr and returns non-zero, so
+# the caller falls back to scanning the bare image list instead of aborting.
+generate_fleet_list() {
+    local ref="$1" images_file="$2" lists="$3" out="fleet.txt"
+
+    if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import yaml' >/dev/null 2>&1; then
+        echo "Note: python3/PyYAML not available; scanning without entrypoint=/roots= assertions" >&2
+        return 1
+    fi
+    if ! command -v helm >/dev/null 2>&1; then
+        echo "Note: helm not found; scanning without entrypoint=/roots= assertions" >&2
+        return 1
+    fi
+
+    echo "Generating a fleet list (how RKE2 starts each image) for ${ref}..." >&2
+    local gen_log gen_args=("$ref" -o "$out")
+    if [[ -n "$images_file" ]]; then
+        gen_args+=(--images-from "$images_file")
+    else
+        gen_args+=(--lists "$lists")
+    fi
+    gen_log=$(mktemp)
+    if "$script_dir/gen-rke2-vexscan" "${gen_args[@]}" 2>"$gen_log"; then
+        rm -f "$gen_log"
+        echo "$out"
+        return 0
+    fi
+    echo "Warning: gen-rke2-vexscan failed; scanning without entrypoint=/roots= assertions" >&2
+    cat "$gen_log" >&2
+    rm -f "$gen_log"
+    return 1
+}
+
+# prime_rewrite_fleet_list applies the same docker.io -> registry.rancher.com
+# rewrite as images.txt's, but only to the leading image-ref token of each
+# fleet-list line -- comments and entrypoint=/cmd=/roots= assertions are left
+# untouched, unlike images.txt where the whole line is a bare ref.
+prime_rewrite_fleet_list() {
+    python3 - "$1" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+
+
+def rewrite(ref):
+    if ref.startswith("docker.io/"):
+        ref = "registry.rancher.com/" + ref[len("docker.io/"):]
+    first = ref.split("/", 1)[0]
+    if not re.search(r"[.:]", first):
+        ref = "registry.rancher.com/" + ref
+    return ref
+
+
+with open(path, encoding="utf-8") as fh:
+    lines = fh.read().split("\n")
+
+out = []
+for line in lines:
+    if line == "" or line.startswith("#"):
+        out.append(line)
+        continue
+    parts = line.split(None, 1)
+    ref = rewrite(parts[0])
+    out.append(ref if len(parts) == 1 else f"{ref} {parts[1]}")
+
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(out))
+PY
+}
+
+rm -f "$output_file" fleet.txt
 rm -f images.txt
 
 # vexscan's --images-from accepts a URL or a file. In release mode we hand it
-# the release URL untouched; in branch mode we build a local images.txt.
+# the release URL untouched unless a fleet list can be generated for it; in
+# branch mode we build a local images.txt (and try to build a fleet list too).
 images_source=""
 
 echo "Scanning using ${source_desc}"
@@ -306,6 +390,14 @@ if [[ -n "$release_version" ]]; then
     # Release mode: point vexscan straight at the published images list.
     images_source="https://github.com/rancher/rke2/releases/download/${release_tag_url}/rke2-images.linux-amd64.txt"
     echo "Using release images list: $images_source"
+
+    # gen-rke2-vexscan's default --lists is "default,ingress-nginx"; restrict
+    # it to "default" here so the fleet list covers exactly the one image list
+    # this mode actually scans.
+    fleet_list=""
+    if fleet_list=$(generate_fleet_list "$release_tag" "" "default"); then
+        images_source="./${fleet_list}"
+    fi
 else
     # Build-from-source mode: run the upstream build-images script in a temp
     # sandbox and collect the generated image lists into a single images.txt.
@@ -431,6 +523,20 @@ EOF
         exit 1
     fi
 
+    # In build-from-source mode the rke2-runtime reference points at a dev tag
+    # that is never pushed to a registry, so a registry scan of it always fails.
+    # Drop it here (before any registry rewrite, which doesn't change whether a
+    # line matches) and scan the real runtime image tarball from CI instead.
+    sed -i.bak '/\/rke2-runtime:/d; /^rke2-runtime:/d' images.txt
+    rm -f images.txt.bak
+
+    echo "Built image list with $(wc -l < images.txt | tr -d ' ') images"
+
+    # Try to generate a fleet list before any --prime rewrite: gen-rke2-vexscan
+    # resolves entrypoints/roots by pulling each image from its home registry
+    # (docker.io), which the prime-rewritten refs below no longer point at.
+    fleet_list=$(generate_fleet_list "$branch" images.txt "") || fleet_list=""
+
     # When --prime is set, rewrite image references to registry.rancher.com
     # instead of docker.io (or an implicit docker.io with no registry prefix).
     if [[ "$use_prime_ingress" == "true" ]]; then
@@ -447,16 +553,16 @@ EOF
                 print line
             }
         ' images.txt > images.txt.tmp && mv images.txt.tmp images.txt
+
+        if [[ -n "$fleet_list" ]]; then
+            prime_rewrite_fleet_list "$fleet_list"
+        fi
     fi
 
-    # In build-from-source mode the rke2-runtime reference points at a dev tag
-    # that is never pushed to a registry, so a registry scan of it always fails.
-    # Drop it here and scan the real runtime image tarball from CI instead.
-    sed -i.bak '/\/rke2-runtime:/d; /^rke2-runtime:/d' images.txt
-    rm -f images.txt.bak
-
-    echo "Built image list with $(wc -l < images.txt | tr -d ' ') images"
     images_source="./images.txt"
+    if [[ -n "$fleet_list" ]]; then
+        images_source="./${fleet_list}"
+    fi
 
     if [[ "$scan_runtime_image" == "true" ]]; then
         fetch_runtime_layout "$branch"

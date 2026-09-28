@@ -19,27 +19,33 @@ upstream [`contrib/vexscan-dashboard.py`](https://github.com/cwayne18/vexscan/bl
 ## How it works
 
 - **`scan.sh`** builds the list of images RKE2 ships and runs `vexscan` over it,
-  writing a JSON report.
+  writing a JSON report. In both modes it first tries `./gen-rke2-vexscan` to
+  turn the bare list into a *fleet list* (see below) before handing it to
+  `vexscan --images-from`; if that fails for any reason (missing `python3`,
+  `PyYAML` or `helm`, a network hiccup, ...) it warns and falls back to the
+  bare list rather than aborting the scan.
   - *master / release branch*: reproduces the image list by running the upstream
     `scripts/build-images` in a sandbox (the same approach used by rke2-toolbox).
     The `rke2-runtime` image is scanned separately (see below), since in this
     mode its reference points at an unpublished dev tag that cannot be pulled.
   - *`--release <version>`*: hands `vexscan` the published `rke2-images` list URL
-    from the GitHub release directly (which already includes `rke2-runtime`).
+    from the GitHub release directly (which already includes `rke2-runtime`),
+    unless a fleet list generated from that same release replaces it.
 - **`.github/workflows/scan-report.yml`** runs the scan daily (and on demand),
   renders each run into `reports/html/<scan-id>/` with `vexscan-dashboard.py`,
   rebuilds the landing page, and commits the results.
 - **`.github/scripts/generate_index.py`** builds `reports/html/index.html`, the
   landing page listing every run (styled after rke2-toolbox's index).
 - **`.github/workflows/deploy-pages.yml`** publishes `reports/html/` to GitHub Pages.
-- **`gen-rke2-vexscan`** builds a *fleet list* for a release — the image list
-  plus, per image, how RKE2 actually starts it. See below.
+- **`gen-rke2-vexscan`** builds a *fleet list* for a release or branch — the
+  image list plus, per image, how RKE2 actually starts it. `scan.sh` runs it
+  automatically. See below.
 
 ## `gen-rke2-vexscan` — saying how each image is started
 
-`scan.sh --release` hands vexscan a bare list of image references, so every
-image is scanned as if its own `ENTRYPOINT` is what runs. For most of RKE2's
-images that is wrong, and wrong in the direction that costs you answers:
+`scan.sh` hands vexscan a bare list of image references, so every image is
+scanned as if its own `ENTRYPOINT` is what runs. For most of RKE2's images that
+is wrong, and wrong in the direction that costs you answers:
 
 | image | its config says | RKE2 actually runs |
 |---|---|---|
@@ -67,24 +73,34 @@ reconstructs the same facts from the release artifacts:
 vexscan --images-from rke2.txt --all --ecosystem os
 ```
 
-Four sources, all pinned to the tag you name and all checkable:
+For a branch or commit that has never been released — no GitHub release
+assets, no pushed `rke2-runtime` image — pass the image list `scan.sh` already
+built instead:
 
-- the **image list**, from the release's `rke2-images*.linux-amd64.txt`;
-- the **addons**, from `rancher/rke2-runtime:<tag>`, which ships every bundled
-  Helm chart inline (base64 gzipped, in its `charts/*.yaml` HelmChart CRs), so
-  the charts are exactly the build that release deploys — rendered with
-  `helm template`, never fetched from a chart repo;
+```sh
+./gen-rke2-vexscan master --images-from images.txt -o fleet.txt
+vexscan --images-from fleet.txt --all --ecosystem os
+```
+
+Four sources, all pinned to the ref you name and all checkable:
+
+- the **image list**, from the release's `rke2-images*.linux-amd64.txt`, or
+  from `--images-from` for a ref with no release;
+- the **addons**, from `charts/chart_versions.yaml` at that ref, fetched from
+  the exact pinned `https://rke2-charts.rancher.io/assets/<package>/<name>-
+  <version>.tgz` URL `scripts/build-chart.sh` builds them from — so this needs
+  no pushed `rke2-runtime` image and works the same for a branch as a tag;
 - the **static pods**, from `pkg/podtemplate/spec.go` and `pkg/images/images.go`
-  at the tag, which is where `kube-apiserver`, `etcd` and friends get their
+  at the ref, which is where `kube-apiserver`, `etcd` and friends get their
   (bare) command names;
 - the **paths**, from the image layers, because a bare `etcd` has to be resolved
   against a `PATH` a fleet list cannot see.
 
-It only names charts this image list actually deploys. The runtime image carries
-every chart RKE2 *can* install, including three mutually exclusive CNIs; a chart
-whose images are not in the selected lists is not this cluster's chart and
-contributes nothing. That is why `hardened-flannel` gets canal's command and not
-a union of canal's and standalone-flannel's.
+It only names charts this image list actually deploys. `chart_versions.yaml`
+pins every chart RKE2 *can* install, including three mutually exclusive CNIs; a
+chart whose images are not in the selected lists is not this cluster's chart
+and contributes nothing. That is why `hardened-flannel` gets canal's command
+and not a union of canal's and standalone-flannel's.
 
 Two things it will not do:
 
@@ -102,12 +118,14 @@ Registry blobs are cached under `~/.cache/rke2-vexscan/<tag>/`; `--no-cache`
 clears it first.
 
 ```
-Usage: gen-rke2-vexscan <tag> [-o FILE] [--lists default,ingress-nginx]
-                              [--cache DIR] [--no-cache]
+Usage: gen-rke2-vexscan <tag> [-o FILE] [--images-from FILE]
+                              [--lists default,ingress-nginx]
+                              [--chart-repo URL] [--cache DIR] [--no-cache]
 ```
 
-`--lists` selects which of the release's image lists to cover. The default is
-`default,ingress-nginx`, matching a default install with the bundled ingress.
+`--lists` selects which of the release's image lists to cover (ignored when
+`--images-from` is given). The default is `default,ingress-nginx`, matching a
+default install with the bundled ingress.
 
 ### Scanning the `rke2-runtime` image
 
