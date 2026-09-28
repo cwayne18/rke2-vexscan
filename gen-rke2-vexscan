@@ -112,12 +112,32 @@ def norm(ref: str) -> str:
     return ref
 
 
+def foreign_registry(ref: str) -> str | None:
+    """The registry host if ref names one other than Docker Hub, else None.
+
+    A leading path segment is a registry host, not a Docker Hub namespace, if
+    it contains a "." or ":" or is exactly "localhost" -- the same rule
+    `docker pull` uses. norm() already strips Docker Hub's own hostnames, so
+    anything left over here (e.g. a --prime images.txt's registry.rancher.com
+    images) names a registry this tool has no credentials or API support for.
+    """
+    first = ref.split("/", 1)[0]
+    if first == "localhost" or "." in first or ":" in first:
+        return first
+    return None
+
+
+class NotInspectable(Exception):
+    """Raised for an image hosted on a registry this tool cannot query."""
+
+
 class Image:
     """One image in the registry, fetched lazily and cached on disk."""
 
     def __init__(self, ref: str, cache: str):
         self.ref = norm(ref)
         self.repo, _, self.tag = self.ref.partition(":")
+        self.foreign = foreign_registry(self.ref)
         self.cache = os.path.join(cache, self.ref.replace("/", "_").replace(":", "_"))
         os.makedirs(self.cache, exist_ok=True)
         self._token = None
@@ -136,6 +156,8 @@ class Image:
         return {"Authorization": f"Bearer {self.token}", "Accept": ACCEPT}
 
     def manifest(self) -> dict:
+        if self.foreign:
+            raise NotInspectable(self.foreign)
         p = os.path.join(self.cache, "manifest.json")
         if os.path.exists(p):
             return json.load(open(p))
@@ -486,11 +508,25 @@ def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[st
             cache: str, workdir: str, chart_repo: str) -> list[Entry]:
     entries = {r: Entry(ref=r, origin=origin[r], spelling=spelling[r]) for r in refs}
     images: dict[str, Image] = {}
+    warned: set[str] = set()
 
     def img(ref: str) -> Image:
         if ref not in images:
             images[ref] = Image(ref, cache)
         return images[ref]
+
+    def safe_resolve(ref: str, cmd: str) -> str | None:
+        # A registry error here (this tool only ever queries Docker Hub, and
+        # even that can rate-limit or drop a request) must not sink every
+        # other image's assertions -- surface it as an ordinary unresolved
+        # command, which the emitted comment already explains and flags.
+        try:
+            return img(ref).resolve(cmd)
+        except (NotInspectable, urllib.error.URLError) as e:
+            if ref not in warned:
+                warned.add(ref)
+                log(f"  {ref}: could not read the image config ({e}); leaving its commands unresolved")
+            return None
 
     # -- addons, from the charts this ref actually ships ---------------------
     # rke2-runtime need not be in the image list at all: build-from-source
@@ -541,7 +577,7 @@ def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[st
                 continue  # the image's own entrypoint runs; nothing to assert
             entries[ref].starts.append(Start(
                 cmd, args, f"{name} chart, container {c.get('name', '?')}",
-                img(ref).resolve(cmd[0]),
+                safe_resolve(ref, cmd[0]),
             ))
 
     # -- static pods, from the release source -------------------------------
@@ -551,13 +587,17 @@ def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[st
         if not ref:
             continue
         entries[ref].starts.append(Start(
-            [cmd], [], f"static pod {cmd} (pkg/podtemplate/spec.go)", img(ref).resolve(cmd),
+            [cmd], [], f"static pod {cmd} (pkg/podtemplate/spec.go)", safe_resolve(ref, cmd),
         ))
 
     # -- the runtime image is never a pod, if it is even in the list --------
     if runtime:
         rt = entries[runtime]
-        bins = img(runtime).programs_in("/bin/")
+        try:
+            bins = img(runtime).programs_in("/bin/")
+        except (NotInspectable, urllib.error.URLError) as e:
+            log(f"  {runtime}: could not read the image config ({e}); skipping its /bin/ scan")
+            bins = []
         rt.note = ("not run as a pod at all -- rke2 extracts its /bin onto the host and the "
                    "host runs those binaries, so the roots are the binaries themselves")
         for b in bins:
@@ -619,7 +659,10 @@ def emit(tag: str, lists: list[str], entries: list[Entry], cache: str, out) -> d
 
     def config_comment(e: Entry) -> str:
         im = images[e.ref]
-        ep, cm = im.entrypoint(), im.cmd()
+        try:
+            ep, cm = im.entrypoint(), im.cmd()
+        except (NotInspectable, urllib.error.URLError) as err:
+            return f"unknown -- could not read the image config ({err})"
         if ep or cm:
             return " ".join(ep + cm)
         return "no ENTRYPOINT and no CMD"
