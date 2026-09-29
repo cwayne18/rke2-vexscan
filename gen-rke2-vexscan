@@ -502,6 +502,9 @@ class Entry:
     spelling: str
     starts: list[Start] = field(default_factory=list)
     note: str = ""
+    skip_reason: str = ""  # set when a chart that would have named this image's
+                            # command could not be rendered at all -- distinct
+                            # from a genuine "no assertion needed"
 
 
 def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[str, str],
@@ -555,6 +558,14 @@ def collect(tag: str, refs: list[str], origin: dict[str, str], spelling: dict[st
         containers, err = render(name, charts[name], kubever)
         if err:
             log(f"  {name}: SKIPPED ({err})")
+            # wanted & entries are the images this chart would have named a
+            # command for. Without a render, this generator has nothing to
+            # say about them -- record why, so the emitted line reads
+            # "could not verify" rather than silently looking identical to
+            # "no assertion needed", which a chart-render failure is not.
+            for ref in wanted & set(entries):
+                if not entries[ref].skip_reason:
+                    entries[ref].skip_reason = f"{name} chart could not be rendered ({err})"
             continue
 
         rendered = {norm(c["image"]) for c in containers}
@@ -644,10 +655,12 @@ def emit(tag: str, lists: list[str], entries: list[Entry], cache: str, out) -> d
     w("# " + "-" * 73)
     w()
 
-    single, multi, plain, unresolved = [], [], [], []
+    single, multi, plain, unresolved, skipped = [], [], [], [], []
     for e in entries:
         if e.note:
             multi.append(e)
+        elif not e.starts and e.skip_reason:
+            skipped.append(e)
         elif not e.starts:
             plain.append(e)
         elif any(s.resolved is None for s in e.starts):
@@ -769,6 +782,24 @@ def emit(tag: str, lists: list[str], entries: list[Entry], cache: str, out) -> d
             w(f"{e.spelling}")
         w()
 
+    if skipped:
+        w("# " + "-" * 73)
+        w("# Images whose deploying chart could not be rendered at all.")
+        w("#")
+        w("# Left bare on purpose. This is not \"no assertion needed\" -- the chart")
+        w("# that would have named this image's command failed before it could be")
+        w("# read, usually because it needs a value only a real cluster has (a")
+        w("# vCenter cluster id, for example). Supply that value and re-run, or")
+        w("# resolve the command by hand and add the key yourself.")
+        w("# " + "-" * 73)
+        for e in skipped:
+            stats["skipped"] += 1
+            w()
+            w(f"# could not verify: {e.skip_reason}")
+            w(f"#   config declares: {config_comment(e)}")
+            w(f"{e.spelling}")
+        w()
+
     w("# " + "-" * 73)
     w("# What this generator will not decide for you.")
     w("#")
@@ -861,6 +892,8 @@ def main() -> int:
         log(f"  {stats['unresolved']} left bare: a command did not resolve to a path")
     if stats["unwritable"]:
         log(f"  {stats['unwritable']} left bare: an argv token contains whitespace")
+    if stats["skipped"]:
+        log(f"  {stats['skipped']} left bare: could not verify (a deploying chart failed to render)")
     if args.output:
         log(f"\nwrote {args.output}")
     return 0
