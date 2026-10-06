@@ -133,18 +133,27 @@ In branch mode, `build-images` tags the runtime image with a dev version that is
 never pushed to a registry, so it cannot be pulled and scanned like the other
 images. Instead `scan.sh`:
 
-1. Drops the unpullable `rke2-runtime:` reference from the generated image list.
-2. Finds the most recent completed `rancher/rke2` CI run for the branch that
-   published a non-expired `rke2-test-artifacts` artifact (the real built runtime
-   image, `rke2-images.linux-amd64.tar.zst`) and downloads it with `gh`.
-3. Decompresses it and converts the docker-save tarball into an OCI layout with
-   `skopeo` (vexscan reads registries or OCI layouts, not docker-save archives).
-4. Scans the layout with `vexscan --haul` and merges those findings into the
-   report so the runtime image is covered alongside everything else.
+1. Captures the unpullable `rke2-runtime:` reference from the generated image
+   list as the expected version, then drops it (it can't be scanned directly).
+2. Walks completed `rancher/rke2` CI runs for the branch, newest first, looking
+   for one with a non-expired `rke2-test-artifacts` artifact (the real built
+   runtime image, `rke2-images.linux-amd64.tar.zst`) and downloads it with `gh`.
+3. Decompresses it and reads back the image's own `RepoTag` to check it against
+   the expected version from step 1. A run on the branch is not a guarantee its
+   artifacts build the branch's own version — e.g. an upgrade-path test run on
+   `master` can also bundle an older release line's runtime image under a
+   matching artifact name — so a mismatch is treated like "no artifact" and the
+   search keeps trying older runs rather than silently scanning the wrong image.
+4. Converts the matched docker-save tarball into an OCI layout with `skopeo`
+   (vexscan reads registries or OCI layouts, not docker-save archives).
+5. Scans the layout with `vexscan --haul` and merges those findings into the
+   report so the runtime image is covered alongside everything else. The chosen
+   CI run URL, artifact name, and expected/actual version are recorded in the
+   report's `runtime_image_source` field for auditing.
 
-If any step fails (no artifact, missing `gh`/`skopeo`/`zstd`, etc.) the runtime
-scan is skipped with a warning and the rest of the report is unaffected. In
-`--release` mode this is unnecessary because the published `rke2-images` list
+If any step fails (no matching artifact, missing `gh`/`skopeo`/`zstd`, etc.) the
+runtime scan is skipped with a warning and the rest of the report is unaffected.
+In `--release` mode this is unnecessary because the published `rke2-images` list
 already includes the runtime image. Requires `gh` (authenticated), `skopeo` and
 `zstd` on `PATH`; disable with `--no-runtime`.
 
