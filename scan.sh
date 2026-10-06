@@ -178,6 +178,9 @@ runtime_layout=""
 runtime_ref=""
 runtime_source_desc=""
 runtime_source_url=""
+runtime_expected_tag=""
+runtime_run_id=""
+runtime_artifact_name=""
 
 # runtime_repo_tag prints the first RepoTag recorded in a docker-save tarball,
 # so the report can name the runtime image the way build-images tagged it.
@@ -194,15 +197,35 @@ except Exception:
 ' 2>/dev/null
 }
 
+# tag_component prints the version tag portion (after the last ':') of an image
+# ref, so a ref from images.txt and a RepoTag read back out of a CI tarball can
+# be compared by version alone regardless of registry/namespace differences.
+tag_component() {
+    local ref="$1"
+    echo "${ref##*:}"
+}
+
 # fetch_runtime_layout locates the rke2-runtime image tarball from a completed
 # rancher/rke2 CI run for the given branch and converts it to an OCI layout that
 # vexscan can scan with --haul (vexscan reads a registry or an OCI layout, while
 # a CI tarball is a docker-save archive). On success it sets runtime_layout,
 # runtime_ref and the runtime_source_* metadata; on any problem it warns and
 # leaves runtime_layout empty so the rest of the scan proceeds unaffected.
+#
+# A CI run on $ref is not a guarantee its artifacts build $ref's own version --
+# e.g. an upgrade-path test run on master can also bundle an older release
+# line's runtime image. A completed run's artifact is only accepted once its
+# embedded RepoTag version is checked against $expected_tag (when known, i.e.
+# whenever images.txt produced one); a mismatch is treated the same as "no
+# matching artifact" and the search keeps trying older runs.
 fetch_runtime_layout() {
     local ref="$1"
+    local expected_tag="$2"
     local desc="branch '${ref}'"
+
+    if [[ -n "$expected_tag" ]]; then
+        runtime_expected_tag="$expected_tag"
+    fi
 
     if ! command -v gh >/dev/null 2>&1; then
         echo "Warning: gh CLI not found; skipping runtime image scan"
@@ -214,6 +237,9 @@ fetch_runtime_layout() {
     fi
 
     echo "Locating rke2-runtime image tarball from rancher/rke2 CI for ${desc}..."
+    if [[ -n "$expected_tag" ]]; then
+        echo "Expecting rke2-runtime version: $(tag_component "$expected_tag")"
+    fi
     local run_ids
     run_ids=$(gh run list -R rancher/rke2 -b "$ref" -s completed --limit 50 \
         --json databaseId --jq '.[].databaseId' 2>/dev/null)
@@ -222,66 +248,84 @@ fetch_runtime_layout() {
         return 1
     fi
 
-    # Pick the most recent completed run whose artifacts include the runtime
-    # image (uploaded as rke2-test-artifacts / rke2-runtime / rke2-images).
-    local run_id="" artifact_name="" candidate names match
+    # Walk completed runs newest-first, accepting the first one whose runtime
+    # image artifact (uploaded as rke2-test-artifacts / rke2-runtime /
+    # rke2-images) actually contains the expected version. A run on $ref is not
+    # a guarantee of that -- e.g. an upgrade-path test run on master can also
+    # bundle an older release line's runtime image under a matching artifact
+    # name -- so a version mismatch is treated like "no artifact" and the
+    # search keeps trying older runs rather than silently scanning the wrong
+    # image.
+    local run_id="" artifact_name="" repo_tag="" candidate names match mismatch_seen=""
     for candidate in $run_ids; do
         names=$(gh api "repos/rancher/rke2/actions/runs/${candidate}/artifacts" --paginate \
             --jq '.artifacts[] | select(.expired == false) | .name' 2>/dev/null)
         match=$(printf '%s\n' "$names" | grep -E 'rke2-runtime|rke2-test-artifacts|rke2-images' | head -1)
-        if [[ -n "$match" ]]; then
-            run_id="$candidate"
-            artifact_name="$match"
-            break
+        [[ -z "$match" ]] && continue
+
+        local artifact_dir="$work_dir/runtime-artifact"
+        rm -rf "$artifact_dir"
+        mkdir -p "$artifact_dir"
+        if ! gh run download "$candidate" -R rancher/rke2 -n "$match" -D "$artifact_dir" 2>/dev/null; then
+            echo "Warning: failed to download artifact '${match}' from run ${candidate}; trying an older run"
+            continue
         fi
+
+        # Prefer a runtime-specific tarball, otherwise the linux-amd64 image
+        # archive produced by build-image-runtime.
+        local archive
+        archive=$(find "$artifact_dir" -type f \( -name 'rke2-runtime*.tar.zst' -o -name 'rke2-runtime*.tar' \) | head -1)
+        if [[ -z "$archive" ]]; then
+            archive=$(find "$artifact_dir" -type f -name 'rke2-images.linux-amd64.tar.zst' | head -1)
+        fi
+        if [[ -z "$archive" ]]; then
+            archive=$(find "$artifact_dir" -type f -name 'rke2-images.linux-amd64.tar' | head -1)
+        fi
+        if [[ -z "$archive" ]]; then
+            echo "Warning: artifact '${match}' from run ${candidate} contained no image tarball; trying an older run"
+            continue
+        fi
+
+        local tar_path
+        if [[ "$archive" == *.zst ]]; then
+            tar_path="${archive%.zst}"
+            if ! zstd -d -f "$archive" -o "$tar_path" 2>/dev/null; then
+                echo "Warning: failed to decompress artifact '${match}' from run ${candidate}; trying an older run"
+                continue
+            fi
+        else
+            tar_path="$archive"
+        fi
+
+        repo_tag=$(runtime_repo_tag "$tar_path")
+        [[ -z "$repo_tag" ]] && repo_tag="rancher/rke2-runtime:ci-${ref}"
+
+        if [[ -n "$expected_tag" && "$(tag_component "$repo_tag")" != "$(tag_component "$expected_tag")" ]]; then
+            echo "Warning: run ${candidate}'s artifact '${match}' is rke2-runtime $(tag_component "$repo_tag"), not the expected $(tag_component "$expected_tag") for ${desc}; trying an older run"
+            mismatch_seen="true"
+            continue
+        fi
+
+        run_id="$candidate"
+        artifact_name="$match"
+        break
     done
 
     if [[ -z "$run_id" ]]; then
-        echo "Warning: no rancher/rke2 CI run for ${desc} has a runtime image artifact; skipping runtime image scan"
-        return 1
-    fi
-
-    echo "Found artifact '${artifact_name}' in rancher/rke2 run ${run_id}"
-    local artifact_dir="$work_dir/runtime-artifact"
-    rm -rf "$artifact_dir"
-    mkdir -p "$artifact_dir"
-    if ! gh run download "$run_id" -R rancher/rke2 -n "$artifact_name" -D "$artifact_dir" 2>/dev/null; then
-        echo "Warning: failed to download runtime artifact from run ${run_id}; skipping runtime image scan"
-        return 1
-    fi
-
-    # Prefer a runtime-specific tarball, otherwise the linux-amd64 image archive
-    # produced by build-image-runtime.
-    local archive
-    archive=$(find "$artifact_dir" -type f \( -name 'rke2-runtime*.tar.zst' -o -name 'rke2-runtime*.tar' \) | head -1)
-    if [[ -z "$archive" ]]; then
-        archive=$(find "$artifact_dir" -type f -name 'rke2-images.linux-amd64.tar.zst' | head -1)
-    fi
-    if [[ -z "$archive" ]]; then
-        archive=$(find "$artifact_dir" -type f -name 'rke2-images.linux-amd64.tar' | head -1)
-    fi
-    if [[ -z "$archive" ]]; then
-        echo "Warning: runtime artifact contained no image tarball; skipping runtime image scan"
-        return 1
-    fi
-
-    local tar_path
-    if [[ "$archive" == *.zst ]]; then
-        tar_path="${archive%.zst}"
-        echo "Decompressing $(basename "$archive")..."
-        if ! zstd -d -f "$archive" -o "$tar_path" 2>/dev/null; then
-            echo "Warning: failed to decompress runtime archive; skipping runtime image scan"
-            return 1
+        if [[ -n "$mismatch_seen" ]]; then
+            echo "Warning: no rancher/rke2 CI run for ${desc} had a runtime image artifact matching the expected version; skipping runtime image scan"
+        else
+            echo "Warning: no rancher/rke2 CI run for ${desc} has a runtime image artifact; skipping runtime image scan"
         fi
-    else
-        tar_path="$archive"
+        return 1
     fi
 
-    local repo_tag
-    repo_tag=$(runtime_repo_tag "$tar_path")
-    [[ -z "$repo_tag" ]] && repo_tag="rancher/rke2-runtime:ci-${ref}"
+    echo "Found artifact '${artifact_name}' in rancher/rke2 run ${run_id} (rke2-runtime ${repo_tag})"
     runtime_ref="$repo_tag"
 
+    # $tar_path is still the decompressed/raw tarball from the loop iteration
+    # that matched and broke out above (bash `local` is function-scoped, not
+    # per-iteration).
     local layout_dir="$work_dir/runtime-oci"
     rm -rf "$layout_dir"
     mkdir -p "$layout_dir"
@@ -297,6 +341,8 @@ fetch_runtime_layout() {
     runtime_layout="$layout_dir"
     runtime_source_url="https://github.com/rancher/rke2/actions/runs/${run_id}"
     runtime_source_desc="rancher/rke2 CI artifact '${artifact_name}' from ${desc}"
+    runtime_run_id="$run_id"
+    runtime_artifact_name="$artifact_name"
     echo "Runtime image ready to scan: ${repo_tag}"
     return 0
 }
@@ -525,8 +571,11 @@ EOF
 
     # In build-from-source mode the rke2-runtime reference points at a dev tag
     # that is never pushed to a registry, so a registry scan of it always fails.
-    # Drop it here (before any registry rewrite, which doesn't change whether a
-    # line matches) and scan the real runtime image tarball from CI instead.
+    # Capture it before dropping it (before any registry rewrite, which doesn't
+    # change whether a line matches): it's the version build-images produced
+    # for this exact ref, and fetch_runtime_layout uses it below to reject a CI
+    # artifact that doesn't actually match $branch's own build.
+    expected_runtime_tag=$(grep -E '(^|/)rke2-runtime:' images.txt | head -1)
     sed -i.bak '/\/rke2-runtime:/d; /^rke2-runtime:/d' images.txt
     rm -f images.txt.bak
 
@@ -565,7 +614,7 @@ EOF
     fi
 
     if [[ "$scan_runtime_image" == "true" ]]; then
-        fetch_runtime_layout "$branch"
+        fetch_runtime_layout "$branch" "$expected_runtime_tag"
     else
         echo "Skipping runtime image scan (--no-runtime)"
     fi
@@ -609,11 +658,13 @@ if [[ -n "$runtime_layout" ]]; then
     runtime_args+=(--format json)
 
     if vexscan "${runtime_args[@]}" > "$runtime_output" && [[ -s "$runtime_output" ]]; then
-        python3 - "$output_file" "$runtime_output" <<'PY'
+        python3 - "$output_file" "$runtime_output" \
+            "$runtime_source_url" "$runtime_run_id" "$runtime_artifact_name" \
+            "$runtime_expected_tag" "$runtime_ref" <<'PY'
 import json
 import sys
 
-main_path, runtime_path = sys.argv[1], sys.argv[2]
+main_path, runtime_path, ci_run_url, ci_run_id, artifact_name, expected_tag, actual_tag = sys.argv[1:8]
 with open(main_path, encoding="utf-8") as fh:
     main = json.load(fh)
 with open(runtime_path, encoding="utf-8") as fh:
@@ -625,6 +676,20 @@ main["results"].extend(runtime.get("results") or [])
 main["failures"].extend(runtime.get("failures") or [])
 if isinstance(main.get("targets"), int):
     main["targets"] = len(main["results"]) + len(main["failures"])
+
+# Record which CI run/artifact actually supplied the runtime image and
+# whether its version matched what was expected for this branch, so a future
+# mismatch (e.g. a CI run bundling an unrelated release line's runtime image
+# under the same artifact name) is auditable from the report itself instead
+# of only from scan.sh's console output.
+main["runtime_image_source"] = {
+    "ci_run_url": ci_run_url or None,
+    "ci_run_id": ci_run_id or None,
+    "artifact_name": artifact_name or None,
+    "expected_tag": expected_tag or None,
+    "actual_tag": actual_tag or None,
+    "version_matched": (not expected_tag) or (expected_tag.rsplit(":", 1)[-1] == actual_tag.rsplit(":", 1)[-1]),
+}
 
 with open(main_path, "w", encoding="utf-8") as fh:
     json.dump(main, fh)
