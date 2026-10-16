@@ -20,7 +20,10 @@ concurrency:
 
 env:
   # Pin the vexscan version and the dashboard script ref for reproducible runs.
-  VEXSCAN_VERSION: latest
+  # v0.24.1 regressed --prefer-vendor suse severity scoring (findings silently
+  # drop to UNKNOWN and fall out of the CRITICAL/HIGH filter -- see the issue
+  # filed against cwayne18/vexscan). Stay on v0.24.0 until that's fixed.
+  VEXSCAN_VERSION: v0.24.0
   VEXSCAN_DASHBOARD_REF: main
   VEXHUB: https://github.com/rancher/vexhub
   PREFER_VENDOR: suse
