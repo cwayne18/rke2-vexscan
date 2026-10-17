@@ -20,10 +20,15 @@ concurrency:
 
 env:
   # Pin the vexscan version and the dashboard script ref for reproducible runs.
-  # v0.24.1 regressed --prefer-vendor suse severity scoring (findings silently
-  # drop to UNKNOWN and fall out of the CRITICAL/HIGH filter -- see the issue
-  # filed against cwayne18/vexscan). Stay on v0.24.0 until that's fixed.
-  VEXSCAN_VERSION: v0.24.0
+  # v0.24.2 is the floor for --prefer-vendor suse. SUSE reorganised its CSAF-VEX
+  # feed into year directories on 2026-10-15; every earlier version builds the
+  # old flat path, which now 404s, and a 404 from that feed reads as "SUSE has
+  # no record" -- so severities silently drop to UNKNOWN and fall out of the
+  # CRITICAL/HIGH filter below, producing an empty report for images that do
+  # still carry CVEs. v0.24.0 is affected identically; this was never a v0.24.1
+  # regression, which is why pinning back to v0.24.0 did not help.
+  # See https://github.com/cwayne18/vexscan/issues/45.
+  VEXSCAN_VERSION: v0.24.2
   VEXSCAN_DASHBOARD_REF: main
   VEXHUB: https://github.com/rancher/vexhub
   PREFER_VENDOR: suse
