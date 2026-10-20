@@ -135,27 +135,24 @@ images. Instead `scan.sh`:
 
 1. Captures the unpullable `rke2-runtime:` reference from the generated image
    list as the expected version, then drops it (it can't be scanned directly).
-2. Walks completed `rancher/rke2` CI runs for the branch, newest first, looking
-   for one with a non-expired `rke2-test-artifacts` artifact (the real built
-   runtime image, `rke2-images.linux-amd64.tar.zst`) and downloads it with `gh`.
-3. Decompresses it and reads back the image's own `RepoTag` to check it against
-   the expected version from step 1. A run on the branch is not a guarantee its
-   artifacts build the branch's own version — e.g. an upgrade-path test run on
-   `master` can also bundle an older release line's runtime image under a
-   matching artifact name — so a mismatch is treated like "no artifact" and the
-   search keeps trying older runs rather than silently scanning the wrong image.
-4. Converts the matched docker-save tarball into an OCI layout with `skopeo`
+2. Clones the branch and runs the upstream `scripts/build-image-runtime`
+   against that real checkout with `docker buildx`, building the actual
+   `rke2-runtime` image for that exact commit (the same build the branch's own
+   CI would produce).
+3. Reads the built image's own `RepoTag` back and checks it against the
+   expected version from step 1, warning (but still scanning) on a mismatch.
+4. Converts the built docker-save tarball into an OCI layout with `skopeo`
    (vexscan reads registries or OCI layouts, not docker-save archives).
 5. Scans the layout with `vexscan --haul` and merges those findings into the
-   report so the runtime image is covered alongside everything else. The chosen
-   CI run URL, artifact name, and expected/actual version are recorded in the
-   report's `runtime_image_source` field for auditing.
+   report so the runtime image is covered alongside everything else. The
+   commit it was built from, and the expected/actual version, are recorded in
+   the report's `runtime_image_source` field for auditing.
 
-If any step fails (no matching artifact, missing `gh`/`skopeo`/`zstd`, etc.) the
-runtime scan is skipped with a warning and the rest of the report is unaffected.
-In `--release` mode this is unnecessary because the published `rke2-images` list
-already includes the runtime image. Requires `gh` (authenticated), `skopeo` and
-`zstd` on `PATH`; disable with `--no-runtime`.
+If any step fails (clone, build, missing `docker`/`skopeo`, etc.) the runtime
+scan is skipped with a warning and the rest of the report is unaffected. In
+`--release` mode this is unnecessary because the published `rke2-images` list
+already includes the runtime image. Requires `git`, `docker` (with `buildx`)
+and `skopeo` on `PATH`; disable with `--no-runtime`.
 
 ## Running locally
 
@@ -202,8 +199,8 @@ Usage: scan.sh [branch] [--release <version>] [--prime] [--no-prime]
   `CRITICAL,HIGH`). Pass `--severity ''` to report every severity.
 - `--fixed-only` / `--no-fixed-only` — keep only CVEs that have a published fix.
   On by default; `--no-fixed-only` includes findings with no fix yet.
-- `--runtime` / `--no-runtime` — in branch mode, also scan the `rke2-runtime`
-  image from a `rancher/rke2` CI artifact (see above). On by default; ignored in
+- `--runtime` / `--no-runtime` — in branch mode, also build and scan the
+  `rke2-runtime` image from source (see above). On by default; ignored in
   `--release` mode where the runtime image is already in the published list.
 - `--output <file>` — JSON output path (default `scan.json`).
 
