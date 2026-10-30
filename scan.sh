@@ -15,6 +15,18 @@
 # python3, PyYAML or helm are missing, or generation fails for any reason, the
 # scan falls back to the bare image list with a warning rather than aborting.
 #
+# With --source-xref, it also asks ./gen-rke2-vexscan which upstream Go module
+# + pinned ref actually backs each stripped component binary that is a go.mod
+# dependency of rke2 (kube-apiserver/kubelet, etcd, containerd, crictl), runs
+# vexscan in source mode (--repo/--ref) against each one, and feeds the
+# resulting "ruled out" VEX statements back into the real image scan as an
+# extra --vexhub. This is what lets a finding like "the vulnerable function is
+# linked but never called" actually resolve on an image whose binaries are all
+# stripped -- the pclntab test vexscan otherwise falls back to only sees
+# package presence, not reachability. Off by default: a source-mode
+# govulncheck run against the whole kubernetes module downloads the module
+# graph and can need several GB of RAM.
+#
 # vexscan does its own triage and VEX resolution, so the output JSON is fed to
 # contrib/vexscan-dashboard.py to render the HTML pages.
 
@@ -31,6 +43,7 @@ prefer_vendor="suse"
 severity_filter="CRITICAL,HIGH"
 fixed_only="true"
 scan_runtime_image="true"
+source_xref="false"
 # Registry used to reproduce PRIME builds. build-images emits the PRIME/hardened
 # image variants only when REGISTRY != docker.io; the final scan targets
 # registry.rancher.com.
@@ -41,7 +54,7 @@ usage() {
     echo "Usage: $0 [branch] [--release <version>] [--prime] [--no-prime]"
     echo "          [--vexhub <url>] [--prefer-vendor <vendor>] [--severity <list>]"
     echo "          [--fixed-only] [--no-fixed-only] [--runtime] [--no-runtime]"
-    echo "          [--output <file>]"
+    echo "          [--source-xref] [--no-source-xref] [--output <file>]"
     echo ""
     echo "Examples:"
     echo "  $0                         # scan master (built from source)"
@@ -52,11 +65,18 @@ usage() {
     echo "  $0 --severity ''           # report every severity (default: CRITICAL,HIGH)"
     echo "  $0 --no-fixed-only         # include CVEs with no fix (default: fixed only)"
     echo "  $0 --no-runtime            # skip the rke2-runtime image tarball scan"
+    echo "  $0 --source-xref           # also cross-reference stripped Go binaries"
+    echo "                             # against their upstream source in source mode"
     echo "  $0 --output rke2-master.json"
     echo ""
     echo "By default the report is limited to CRITICAL/HIGH findings that have a fix."
     echo "In branch mode the rke2-runtime image is built from source and scanned"
     echo "(disable with --no-runtime)."
+    echo "--source-xref runs an extra govulncheck source-mode scan per stripped"
+    echo "component (kube-apiserver/kubelet, etcd, containerd, crictl) against its"
+    echo "pinned upstream repo, to rule out findings the stripped-binary pclntab"
+    echo "test can only call 'linked'. Off by default: expensive (downloads the"
+    echo "kubernetes module graph) and not needed for most scans."
     echo "Note: scheduled scans run '$0 master --prime'."
 }
 
@@ -87,6 +107,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-runtime)
             scan_runtime_image="false"
+            shift
+            ;;
+        --source-xref)
+            source_xref="true"
+            shift
+            ;;
+        --no-source-xref)
+            source_xref="false"
             shift
             ;;
         --vexhub)
@@ -367,7 +395,69 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
 }
 
-rm -f "$output_file" fleet.txt
+# generate_source_vex runs ./gen-rke2-vexscan --source-refs for $1 (a release
+# tag or branch) to resolve the upstream repo+ref backing each stripped
+# component binary that is a go.mod dependency of rke2, then runs vexscan in
+# source mode (--repo/--ref/--repo-path) against each one, writing every
+# finding it rules out as a VEX statement into $2 (a directory). Prints $2 on
+# success (at least one component produced a statement) and returns non-zero
+# on any other outcome. Same resilience pattern as generate_fleet_list: a
+# missing python3/PyYAML, network trouble, or a govulncheck failure on any one
+# component warns on stderr and is skipped rather than aborting the scan.
+source_vex_author="rke2-vexscan source cross-reference (ephemeral, not published)"
+
+generate_source_vex() {
+    local ref="$1" out_dir="$2" refs_file="source-refs.txt"
+
+    if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import yaml' >/dev/null 2>&1; then
+        echo "Note: python3/PyYAML not available; skipping source cross-reference" >&2
+        return 1
+    fi
+
+    echo "Resolving upstream source refs for stripped components at ${ref}..." >&2
+    local gen_log
+    gen_log=$(mktemp)
+    if ! "$script_dir/gen-rke2-vexscan" "$ref" --source-refs "$refs_file" 2>"$gen_log"; then
+        echo "Warning: gen-rke2-vexscan --source-refs failed; skipping source cross-reference" >&2
+        cat "$gen_log" >&2
+        rm -f "$gen_log"
+        return 1
+    fi
+    cat "$gen_log" >&2
+    rm -f "$gen_log"
+
+    mkdir -p "$out_dir"
+    local wrote="false" component repo comp_ref repo_path xref_log
+    while read -r component repo comp_ref repo_path; do
+        [[ -z "$component" || "$component" == \#* ]] && continue
+        echo "Source-mode scanning ${component} (${repo}@${comp_ref})..." >&2
+        local xref_args=(
+            --repo "$repo" --ref "$comp_ref"
+            --all --ecosystem golang
+            --vex-out "$out_dir" --vex-author "$source_vex_author"
+            --format json
+        )
+        [[ "$repo_path" != "." ]] && xref_args+=(--repo-path "$repo_path")
+        xref_log=$(mktemp)
+        if vexscan "${xref_args[@]}" >/dev/null 2>"$xref_log"; then
+            wrote="true"
+        else
+            echo "Warning: source-mode scan of ${component} failed; skipping" >&2
+            cat "$xref_log" >&2
+        fi
+        rm -f "$xref_log"
+    done < "$refs_file"
+    rm -f "$refs_file"
+
+    if [[ "$wrote" == "true" ]]; then
+        echo "$out_dir"
+        return 0
+    fi
+    return 1
+}
+
+rm -f "$output_file" fleet.txt source-refs.txt
+rm -rf source-vex
 rm -f images.txt
 
 # vexscan's --images-from accepts a URL or a file. In release mode we hand it
@@ -542,13 +632,23 @@ else
     fi
 fi
 
+source_vexhub=""
+if [[ "$source_xref" == "true" ]]; then
+    source_vexhub=$(generate_source_vex "${release_tag:-$branch}" "source-vex") || source_vexhub=""
+else
+    echo "Skipping source cross-reference (--source-xref not set)"
+fi
+
 echo "Running vexscan (vexhub=${vexhub}, prefer-vendor=${prefer_vendor}, severity=${severity_filter:-all})..."
 vexscan_args=(
     --images-from "$images_source"
     --all --triage
     --vexhub "$vexhub"
-    --prefer-vendor "$prefer_vendor"
 )
+if [[ -n "$source_vexhub" ]]; then
+    vexscan_args+=(--vexhub "$source_vexhub")
+fi
+vexscan_args+=(--prefer-vendor "$prefer_vendor")
 if [[ -n "$severity_filter" ]]; then
     vexscan_args+=(--severity "$severity_filter")
 fi
@@ -572,8 +672,11 @@ if [[ -n "$runtime_layout" ]]; then
         --haul "$runtime_layout"
         --all --triage
         --vexhub "$vexhub"
-        --prefer-vendor "$prefer_vendor"
     )
+    if [[ -n "$source_vexhub" ]]; then
+        runtime_args+=(--vexhub "$source_vexhub")
+    fi
+    runtime_args+=(--prefer-vendor "$prefer_vendor")
     if [[ -n "$severity_filter" ]]; then
         runtime_args+=(--severity "$severity_filter")
     fi

@@ -323,6 +323,139 @@ def source_file(tag: str, path: str) -> str:
     return get(f"{RAW}/{urllib.parse.quote(tag, safe='')}/{path}")
 
 
+# --------------------------------------------------------------------------
+# Source cross-reference (--source-refs)
+# --------------------------------------------------------------------------
+
+# Every one of these is a stripped Go binary RKE2 ships (via a static pod or
+# the rke2-runtime host bundle), and -- unlike calico, coredns, metrics-server
+# and rke2-cloud-provider, which are not go.mod dependencies of rke2 at all --
+# each is pulled in through a go.mod `replace` directive pointing at a k3s-io
+# fork, so the exact source commit the shipped binary was built from is
+# already written down right next to every other version pin RKE2 has. name is
+# the component as scan.sh will refer to it; module is the go.mod replace
+# directive's left-hand (original) module path.
+SOURCE_MODULES = [
+    ("kubernetes", "k8s.io/kubernetes"),
+    ("etcd", "go.etcd.io/etcd/server/v3"),
+    ("containerd", "github.com/containerd/containerd/v2"),
+    ("crictl", "sigs.k8s.io/cri-tools"),
+]
+
+
+@dataclass
+class SourceRef:
+    component: str
+    repo: str
+    ref: str
+    repo_path: str
+
+
+def _go_mod_replacements(gomod: str) -> dict[str, tuple[str, str]]:
+    """module -> (replacement path, version) for every `replace` line.
+
+    Handles both the parenthesised `replace (\n ... \n)` block and a bare
+    `replace X => Y vZ` line, go.mod's two equivalent spellings.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    block = re.search(r"replace\s*\(([\s\S]*?)\n\)", gomod)
+    bodies = [block.group(1)] if block else []
+    bodies += re.findall(r"^replace\s+(\S+\s*=>\s*\S+\s+\S+)\s*$", gomod, re.M)
+    for body in bodies:
+        for mod, repl, version in re.findall(r"^\s*(\S+)\s*=>\s*(\S+)\s+(\S+)\s*$", body, re.M):
+            out[mod] = (repl, version)
+    return out
+
+
+def _verify_repo_path(repo: str, ref: str, module: str, remainder: list[str]) -> str | None:
+    """Find the subdirectory of repo@ref whose own go.mod declares `module`.
+
+    remainder is the replacement module path's segments after the repo root
+    (e.g. ["server", "v3"] for github.com/k3s-io/etcd/server/v3). Tried in
+    order: the full remainder, then -- since a trailing vN is frequently a Go
+    major-version suffix on the module path rather than a literal directory
+    (e.g. containerd's .../v2, where go.mod lives at the repo root) -- the
+    remainder with a trailing vN segment dropped. Each candidate is confirmed
+    by actually fetching its go.mod and checking the module directive, rather
+    than guessed from the path shape alone: gen-rke2-vexscan's rule throughout
+    is to assert nothing it cannot check.
+    """
+    candidates = ["/".join(remainder)]
+    if remainder and re.fullmatch(r"v[0-9]+", remainder[-1]):
+        trimmed = "/".join(remainder[:-1])
+        if trimmed not in candidates:
+            candidates.append(trimmed)
+    for subdir in candidates:
+        path = f"{subdir}/go.mod" if subdir else "go.mod"
+        try:
+            body = get(f"https://raw.githubusercontent.com/{repo[len('github.com/'):]}/{urllib.parse.quote(ref, safe='')}/{path}")
+        except urllib.error.HTTPError:
+            continue
+        m = re.search(r"^module\s+(\S+)", body, re.M)
+        if m and m.group(1) == module:
+            return subdir
+    return None
+
+
+def source_refs(tag: str) -> list[SourceRef]:
+    """Resolve each SOURCE_MODULES entry to the k3s-io fork + pinned ref that
+    actually backs it, by reading go.mod's `replace` directives at this ref --
+    the same pin every other k3s-io/* dependency RKE2 has already carries.
+
+    A module with no replace line, whose replacement is not GitHub-hosted, or
+    whose repo-path cannot be verified is skipped with a warning rather than
+    guessed, same as the rest of this script.
+    """
+    gomod = source_file(tag, "go.mod")
+    replacements = _go_mod_replacements(gomod)
+    out = []
+    for component, module in SOURCE_MODULES:
+        repl = replacements.get(module)
+        if repl is None:
+            log(f"  source-refs: {component}: no `replace {module} => ...` in go.mod; skipping")
+            continue
+        repl_path, version = repl
+        if not repl_path.startswith("github.com/"):
+            log(f"  source-refs: {component}: replacement {repl_path!r} is not GitHub-hosted; skipping")
+            continue
+        parts = repl_path.split("/")
+        repo = "/".join(parts[:3])
+        remainder = parts[3:]
+        repo_path = _verify_repo_path(repo, version, module, remainder)
+        if repo_path is None:
+            log(f"  source-refs: {component}: could not verify a go.mod for {module} "
+                f"under {repo}@{version}; skipping")
+            continue
+        out.append(SourceRef(component, repo, version, repo_path or "."))
+    return out
+
+
+def emit_source_refs(refs: list[SourceRef], out) -> None:
+    def w(s=""):
+        print(s, file=out)
+
+    w("# " + "-" * 73)
+    w("# source-refs.txt -- the upstream Go module + exact pinned ref backing")
+    w("# each stripped RKE2 component binary that is a go.mod dependency of")
+    w("# rancher/rke2, resolved from go.mod's `replace` directives. Written for")
+    w("# `vexscan --repo REPO --ref REF --repo-path PATH`, run in source mode so")
+    w("# govulncheck's call-graph reachability can rule out a finding the")
+    w("# stripped-binary pclntab test can only ever call `linked`.")
+    w("#")
+    w("# GENERATED by gen-rke2-vexscan --source-refs. Format: one component per")
+    w("# line, 'component repo ref repo-path' (repo-path '.' for the repo root).")
+    w("#")
+    w("# calico, coredns, metrics-server, runc and rke2-cloud-provider are not")
+    w("# go.mod dependencies of rke2 at all -- their version only shows up in")
+    w("# their hardened-* image tag, which needs a different (and considerably")
+    w("# more brittle) heuristic to resolve back to an upstream repo+ref. Not")
+    w("# attempted here.")
+    w("# " + "-" * 73)
+    w()
+    for r in refs:
+        w(f"{r.component} {r.repo} {r.ref} {r.repo_path}")
+
+
 def static_pods(tag: str) -> list[tuple[str, str]]:
     """(command, image repo) for each RKE2 static pod, read from the source.
 
@@ -854,7 +987,25 @@ def main() -> int:
     ap.add_argument("--cache", default=os.path.expanduser("~/.cache/rke2-vexscan"),
                     help="where to keep downloaded layers (default: %(default)s)")
     ap.add_argument("--no-cache", action="store_true", help="delete the cache first")
+    ap.add_argument(
+        "--source-refs",
+        metavar="FILE",
+        help="write ONLY the upstream source repo+ref resolution for stripped Go "
+             "component binaries that are go.mod dependencies of rke2 (kube-apiserver/"
+             "kubelet, etcd, containerd, crictl) to FILE, for 'vexscan --repo --ref "
+             "--repo-path' source-mode reachability, and exit. Independent of the "
+             "image list/chart/helm machinery below -- no helm required.",
+    )
     args = ap.parse_args()
+
+    if args.source_refs:
+        log(f"RKE2 {args.tag}")
+        refs = source_refs(args.tag)
+        with open(args.source_refs, "w", encoding="utf-8") as out:
+            emit_source_refs(refs, out)
+        log(f"  resolved {len(refs)}/{len(SOURCE_MODULES)} component(s)")
+        log(f"\nwrote {args.source_refs}")
+        return 0
 
     if not shutil.which("helm"):
         return log("error: helm is required and was not found on PATH") or 1

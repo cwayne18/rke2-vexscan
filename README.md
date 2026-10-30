@@ -31,6 +31,8 @@ upstream [`contrib/vexscan-dashboard.py`](https://github.com/cwayne18/vexscan/bl
   - *`--release <version>`*: hands `vexscan` the published `rke2-images` list URL
     from the GitHub release directly (which already includes `rke2-runtime`),
     unless a fleet list generated from that same release replaces it.
+  With `--source-xref` it additionally cross-references stripped Go component
+  binaries against their upstream source (see below) before the main scan.
 - **`.github/workflows/scan-report.yml`** runs the scan daily (and on demand),
   renders each run into `reports/html/<scan-id>/` with `vexscan-dashboard.py`,
   rebuilds the landing page, and commits the results.
@@ -121,11 +123,18 @@ clears it first.
 Usage: gen-rke2-vexscan <tag> [-o FILE] [--images-from FILE]
                               [--lists default,ingress-nginx]
                               [--chart-repo URL] [--cache DIR] [--no-cache]
+                              [--source-refs FILE]
 ```
 
 `--lists` selects which of the release's image lists to cover (ignored when
 `--images-from` is given). The default is `default,ingress-nginx`, matching a
 default install with the bundled ingress.
+
+`--source-refs FILE` is a separate, independent action (no `helm` required):
+it resolves the upstream source repo+ref backing each stripped Go component
+binary and writes them to `FILE` instead of building a fleet list. See
+[Cross-referencing stripped binaries against source](#cross-referencing-stripped-binaries-against-source---source-xref)
+below.
 
 ### Scanning the `rke2-runtime` image
 
@@ -153,6 +162,59 @@ scan is skipped with a warning and the rest of the report is unaffected. In
 `--release` mode this is unnecessary because the published `rke2-images` list
 already includes the runtime image. Requires `git`, `docker` (with `buildx`)
 and `skopeo` on `PATH`; disable with `--no-runtime`.
+
+### Cross-referencing stripped binaries against source (`--source-xref`)
+
+Every stripped Go binary RKE2 ships — `kube-apiserver`, `kubelet`,
+`kube-scheduler`, `kube-controller-manager`, `kube-proxy`, `etcd`,
+`containerd` and `crictl` are all built with `install -s` or an explicit
+`strip` — loses the symbol table govulncheck's binary-mode reachability test
+needs, so `vexscan` can only run its coarser pclntab test against them: *is
+any symbol from the vulnerable package linked at all*, not *is the specific
+vulnerable function reachable*. A finding like "the vulnerable function is
+linked but genuinely never called" stays reported as `linked` forever on
+these images, because the sharper test never runs.
+
+`vexscan --repo/--ref` sidesteps stripping entirely: it runs govulncheck in
+**source mode** against a git ref, where call-graph reachability is computed
+straight from source and does not depend on what a build strips. `--source-xref`
+runs that, once per component, against the exact upstream commit RKE2's own
+`go.mod` pins for this ref — the same real build that produced the shipped
+binary — and writes every finding it rules out as VEX statements via
+`--vex-out`, which the main scan then layers in as an extra `--vexhub`
+alongside `rancher/vexhub`. Nothing about how the main scan is computed
+changes; this only fills in verdicts the pclntab test could not reach on its
+own.
+
+Resolution is `./gen-rke2-vexscan <ref> --source-refs FILE`: it reads
+`go.mod`'s `replace` directives for the four components that are actual
+`go.mod` dependencies of `rancher/rke2` — `k8s.io/kubernetes` (covers all five
+`kube-*` binaries), `go.etcd.io/etcd/server/v3`, `github.com/containerd/
+containerd/v2` and `sigs.k8s.io/cri-tools` — and resolves each one to the
+`k3s-io` fork + exact pinned tag the replace directive names, verifying the
+module path at candidate subdirectories against the replacement's own `go.mod`
+(so, e.g., etcd's `server/v3` replacement resolves to repo-path `server`, not
+a literal `server/v3` directory, while containerd's `v2` is a pure
+major-version suffix with no subdirectory at all). A component with no
+replace line, a non-GitHub replacement, or an unverifiable path is skipped
+with a warning rather than guessed at.
+
+**Not covered**: `calico`, `coredns`, `metrics-server`, `runc` and
+`rke2-cloud-provider` are not `go.mod` dependencies of `rke2` — their versions
+only appear in their own `hardened-*`/`rke2-cloud-provider` image tags, which
+would need a separate (and considerably more brittle) tag-parsing heuristic to
+resolve back to an upstream repo+ref. Left as follow-up work.
+
+**Caveat**: source-mode reachability is computed for the whole module (all of
+`k8s.io/kubernetes`, say), not scoped to the single binary that image ships.
+If some *other* command in the same module calls the vulnerable symbol, the
+whole-module verdict is "reachable" and no VEX statement gets written — safe,
+but coarser than a per-binary verdict would be.
+
+`--source-xref` is off by default: a source-mode govulncheck run against the
+whole `kubernetes` module downloads its module graph and builds it, which
+`vexscan`'s own docs note can need several GB of RAM. The scheduled daily scan
+(`.github/workflows/scan-report.yml`) enables it explicitly.
 
 ## Running locally
 
@@ -183,7 +245,7 @@ Scan a published release:
 Usage: scan.sh [branch] [--release <version>] [--prime] [--no-prime]
                [--vexhub <url>] [--prefer-vendor <vendor>] [--severity <list>]
                [--fixed-only] [--no-fixed-only] [--runtime] [--no-runtime]
-               [--output <file>]
+               [--source-xref] [--no-source-xref] [--output <file>]
 ```
 
 - `branch` — build the image list from this RKE2 branch (default `master`).
@@ -202,6 +264,10 @@ Usage: scan.sh [branch] [--release <version>] [--prime] [--no-prime]
 - `--runtime` / `--no-runtime` — in branch mode, also build and scan the
   `rke2-runtime` image from source (see above). On by default; ignored in
   `--release` mode where the runtime image is already in the published list.
+- `--source-xref` / `--no-source-xref` — also cross-reference stripped Go
+  component binaries against their upstream source in govulncheck source mode
+  (see above). Off by default: expensive, downloads the kubernetes module
+  graph. The scheduled daily scan enables it.
 - `--output <file>` — JSON output path (default `scan.json`).
 
 ## License

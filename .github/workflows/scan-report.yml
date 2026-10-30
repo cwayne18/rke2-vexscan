@@ -94,6 +94,7 @@ jobs:
             --prefer-vendor "$PREFER_VENDOR" \
             --severity "$SEVERITY" \
             --fixed-only \
+            --source-xref \
             --output scan.json
 
       - name: Determine scan id
