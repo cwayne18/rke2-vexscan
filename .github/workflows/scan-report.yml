@@ -69,7 +69,21 @@ jobs:
       - run: pip install pyyaml
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        # docker/setup-buildx-action pulls its builder image from Docker Hub
+        # via CloudFront, which has occasionally reset the connection mid-pull
+        # (e.g. run 42849248454). Retry a few times before giving up, mirroring
+        # the retry loop in the commit/push step below.
+        run: |
+          for attempt in 1 2 3; do
+            if docker buildx create --name ci-builder --driver docker-container --bootstrap --use; then
+              exit 0
+            fi
+            echo "Buildx setup failed (attempt $attempt/3), retrying..."
+            docker buildx rm ci-builder >/dev/null 2>&1 || true
+            sleep 10
+          done
+          echo "Failed to set up Docker Buildx after 3 attempts"
+          exit 1
 
       - name: Fetch vexscan-dashboard.py
         run: |
