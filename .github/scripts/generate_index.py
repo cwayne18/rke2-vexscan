@@ -185,7 +185,12 @@ h2 .sub-count {
 .badge-worst-MEDIUM   { background: var(--sev-medium);   color:#473900; border-color:#E5A200; }
 .badge-worst-LOW      { background: rgba(31,103,219,.15); color: var(--sev-low); border-color: rgba(31,103,219,.4); }
 .badge-worst-UNKNOWN  { background: #6C6C76; color:#FFF; border-color:#4A4A52; }
+.badge-stale      { background: rgba(229,162,0,.15); color: #7A5900; border-color: rgba(229,162,0,.4); }
 .rc-meta { color: var(--muted); font-size: 12px; }
+.rc-stale-detail { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.rc-stale-detail div { margin-top: 2px; }
+.rc-stale-detail .tag { font-family: 'Roboto Mono', monospace; }
+.rc-stale-detail .delta { color: #7A5900; }
 
 .empty-state { color: var(--muted); font-style: italic; }
 
@@ -310,7 +315,44 @@ def summarize_run(json_path):
             elif b == BUCKET_VEXED:
                 vexed += 1
     targets = doc.get("targets") or len(results)
-    return {"targets": targets, "affected": affected, "vexed": vexed, "worst": worst}
+
+    # staleness.summary/images come from scan.sh's --staleness-check: which
+    # scanned images are behind their build repo's latest published tag, and
+    # the actionable CVE counts at the scanned tag vs. that latest tag.
+    staleness_doc = doc.get("staleness") or {}
+    staleness = staleness_doc.get("summary") or {}
+
+    return {
+        "targets": targets,
+        "affected": affected,
+        "vexed": vexed,
+        "worst": worst,
+        "stale_needs_update": staleness.get("needs_update", 0),
+        "stale_affected_current": staleness.get("affected_current", 0),
+        "stale_affected_latest": staleness.get("affected_latest", 0),
+        "stale_images": _stale_image_details(staleness_doc.get("images") or []),
+    }
+
+
+def _stale_image_details(images):
+    """Per-image breakdown for images flagged NEEDS_UPDATE, for display on
+    the landing-page card (name, tag change, and CVE delta when known)."""
+    details = []
+    for img in images:
+        if img.get("status") != "NEEDS_UPDATE":
+            continue
+        findings_current = img.get("findings_current") or {}
+        findings_latest = img.get("findings_latest")
+        delta = None
+        if findings_latest is not None:
+            delta = sum(findings_current.values()) - sum(findings_latest.values())
+        details.append({
+            "name": img.get("image_name") or img.get("image") or "?",
+            "current_tag": img.get("current_tag") or "?",
+            "latest_tag": img.get("latest_tag") or "?",
+            "delta": delta,
+        })
+    return details
 
 
 _DATE_RE = re.compile(r"(\d{8})")
@@ -343,6 +385,7 @@ def render_card(scan_id, summary):
 
     badges = ['<span class="badge badge-%s">%s</span>' % (kind, badge_label)]
     meta = ""
+    stale_detail = ""
     if summary:
         if summary["affected"] > 0:
             badges.append('<span class="badge badge-affected">%d affected</span>' % summary["affected"])
@@ -354,20 +397,60 @@ def render_card(scan_id, summary):
         meta = '<span class="rc-meta">%d images · %d vexed</span>' % (
             summary["targets"], summary["vexed"])
 
+        stale_count = summary.get("stale_needs_update") or 0
+        if stale_count > 0:
+            label = "%d image%s behind latest" % (stale_count, "" if stale_count == 1 else "s")
+            title = "Current tag(s) are behind the latest tag published by their build repo"
+            cve_delta = summary.get("stale_affected_current", 0) - summary.get("stale_affected_latest", 0)
+            if cve_delta > 0:
+                label += " (%d CVE%s fixed by updating)" % (cve_delta, "" if cve_delta == 1 else "s")
+                title = "Updating would resolve %d actionable CVE%s" % (cve_delta, "" if cve_delta == 1 else "s")
+            badges.append('<span class="badge badge-stale" title="%s">%s</span>' % (esc(title), esc(label)))
+            stale_detail = _render_stale_detail(summary.get("stale_images") or [])
+
     search_key = ("%s %s %s" % (scan_id, date_str, badge_label)).lower()
     return (
-        '<a class="report-card kind-%s" href="%s/index.html" data-search="%s">'
+        '<a id="%s" class="report-card kind-%s" href="%s/index.html" data-search="%s">'
         '<div class="rc-top"><div>'
         '<div class="rc-name">%s</div>'
         '%s'
         "</div><span class=\"rc-arrow\">&#8594;</span></div>"
         '<div class="rc-badges">%s %s</div>'
+        "%s"
         "</a>"
     ) % (
-        kind, esc(scan_id), esc(search_key), esc(scan_id),
+        esc(scan_id), kind, esc(scan_id), esc(search_key), esc(scan_id),
         ('<div class="rc-date">%s</div>' % esc(date_str)) if date_str else "",
-        " ".join(badges), meta,
+        " ".join(badges), meta, stale_detail,
     )
+
+
+_STALE_DETAIL_LIMIT = 4
+
+
+def _render_stale_detail(stale_images):
+    """Compact per-image breakdown shown under the stale badge: name, tag
+    change, and CVE delta when the latest tag was successfully rescanned."""
+    if not stale_images:
+        return ""
+    lines = []
+    for img in stale_images[:_STALE_DETAIL_LIMIT]:
+        delta = img["delta"]
+        if delta is None:
+            delta_html = ""
+        elif delta > 0:
+            delta_html = ' <span class="delta">&mdash; %d CVE%s fixed</span>' % (
+                delta, "" if delta == 1 else "s")
+        else:
+            delta_html = ' <span class="delta">&mdash; no CVE change</span>'
+        lines.append(
+            '<div><strong>%s</strong> <span class="tag">%s &#8594; %s</span>%s</div>'
+            % (esc(img["name"]), esc(img["current_tag"]), esc(img["latest_tag"]), delta_html)
+        )
+    remaining = len(stale_images) - _STALE_DETAIL_LIMIT
+    if remaining > 0:
+        lines.append('<div>+%d more</div>' % remaining)
+    return '<div class="rc-stale-detail">%s</div>' % "".join(lines)
 
 
 def render_section(title, ids, summaries):

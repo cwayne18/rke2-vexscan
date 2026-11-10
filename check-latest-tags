@@ -1,0 +1,284 @@
+#!/bin/bash
+
+# check-latest-tags -- for each image in an images.txt-style list, resolve the
+# latest tag published by its image-build-<name> GitHub repo and report
+# whether the list's own tag is behind it.
+#
+# This is the tag-resolution core of rke2-toolbox's check_images.sh
+# (https://github.com/cwayne18/rke2-toolbox), ported here so scan.sh can
+# answer "is the image list I just scanned behind the absolute latest
+# available build?" without touching how the scan itself is built or filtered.
+# The override tables below (repo_override, tag_regex_override) are copied
+# from check_images.sh and must be kept in sync with it, or a staleness
+# verdict here can silently diverge from that script's.
+#
+# Usage: check-latest-tags <images-file> [--prime] [-o FILE]
+# Output: a JSON array to stdout (or -o FILE), one object per image:
+#   {"image", "image_name", "current_tag", "build_repo", "latest_tag",
+#    "latest_image", "status"}
+# "status" is one of NEEDS_UPDATE, UP_TO_DATE, UNKNOWN (no build repo or no
+# tag could be resolved).
+
+set -euo pipefail
+
+images_file=""
+output_file=""
+use_prime_ingress="false"
+
+usage() {
+    echo "Usage: $0 <images-file> [--prime] [-o FILE]"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --prime)
+            use_prime_ingress="true"
+            shift
+            ;;
+        -o|--output)
+            [[ -n "${2:-}" ]] || { echo "Error: --output requires a value"; usage; exit 1; }
+            output_file="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            if [[ -z "$images_file" ]]; then
+                images_file="$1"
+                shift
+            else
+                echo "Error: unknown argument '$1'"
+                usage
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+if [[ -z "$images_file" ]]; then
+    echo "Error: an images file is required"
+    usage
+    exit 1
+fi
+if [[ ! -f "$images_file" ]]; then
+    echo "Error: '$images_file' not found"
+    exit 1
+fi
+
+# Optional overrides for image names that do not follow the standard
+# image-build-<name> mapping. Ported verbatim from rke2-toolbox's
+# check_images.sh; keep in sync with that script.
+repo_override() {
+    case "$1" in
+        klipper-lb) echo "k3s-io/klipper-lb" ;;
+        klipper-helm) echo "k3s-io/klipper-helm" ;;
+        kube-webhook-certgen) echo "rancher/ingress-nginx" ;;
+        nginx-ingress-controller) echo "rancher/ingress-nginx" ;;
+        hardened-snapshot-controller) echo "image-build-external-snapshotter" ;;
+        hardened-dns-node-cache) echo "image-build-dns-nodecache" ;;
+        hardened-cluster-autoscaler) echo "image-build-cluster-proportional-autoscaler" ;;
+        *) echo "" ;;
+    esac
+}
+
+# For image sources built from a specific branch line, constrain tag matching.
+# In rancher/ingress-nginx this corresponds to the v1.14.x hardened/prime tags.
+# Ported verbatim from check_images.sh; keep in sync with that script.
+tag_regex_override() {
+    case "$1" in
+        kube-webhook-certgen|nginx-ingress-controller)
+            if [[ "$use_prime_ingress" == "true" ]]; then
+                echo '^v1\.14\..*-prime[0-9]+$'
+            else
+                echo '^v1\.14\..*-hardened[0-9]+$'
+            fi
+            ;;
+        *) echo "" ;;
+    esac
+}
+
+normalize_repo_slug() {
+    local repo="$1"
+    if [[ "$repo" == */* ]]; then
+        printf '%s\n' "$repo"
+    else
+        printf 'rancher/%s\n' "$repo"
+    fi
+}
+
+have_gh="false"
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    have_gh="true"
+fi
+
+github_tags() {
+    local repo="$1"
+    local repo_slug
+    repo_slug="$(normalize_repo_slug "$repo")"
+
+    if [[ "$have_gh" == "true" ]]; then
+        gh api --paginate "repos/${repo_slug}/tags?per_page=100" 2>/dev/null \
+            | perl -ne 'while (/"name"\s*:\s*"([^"]+)"/g) { print "$1\n" }'
+    else
+        # Fall back to an unauthenticated (or token-authenticated, if
+        # GITHUB_TOKEN/GH_TOKEN is set) curl call when gh is unavailable.
+        local auth=()
+        local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+        [[ -n "$token" ]] && auth=(-H "Authorization: Bearer ${token}")
+        curl -fsSL "${auth[@]}" "https://api.github.com/repos/${repo_slug}/tags?per_page=100" 2>/dev/null \
+            | perl -ne 'while (/"name"\s*:\s*"([^"]+)"/g) { print "$1\n" }'
+    fi
+}
+
+# Resolve an image's build repo and the latest tag it has published. Output:
+# "repo|tag", or empty on failure. Ported from check_images.sh.
+find_build_repo_and_latest_tag() {
+    local image_name="$1"
+    local repo_candidate
+    local latest=""
+    local override_repo
+    local tag_regex
+    local tags
+    local filtered_tags
+
+    local candidates=()
+    override_repo="$(repo_override "$image_name")"
+    if [[ -n "$override_repo" ]]; then
+        candidates+=("$override_repo")
+    fi
+
+    tag_regex="$(tag_regex_override "$image_name")"
+
+    candidates+=("image-build-${image_name}")
+
+    if [[ "$image_name" == hardened-* ]]; then
+        candidates+=("image-build-${image_name#hardened-}")
+    fi
+
+    if [[ "$image_name" == mirrored-* ]]; then
+        candidates+=("image-build-${image_name#mirrored-}")
+    fi
+
+    for repo_candidate in "${candidates[@]}"; do
+        tags=$(github_tags "$repo_candidate" || true)
+        if [[ -n "$tags" ]]; then
+            filtered_tags="$tags"
+            if [[ -n "$tag_regex" ]]; then
+                filtered_tags=$(printf '%s\n' "$filtered_tags" | grep -E "$tag_regex" || true)
+            fi
+
+            latest=$(printf '%s\n' "$filtered_tags" | sed '/^\s*$/d' | sort -uV | tail -1)
+            if [[ -n "$latest" ]]; then
+                printf '%s|%s\n' "$(normalize_repo_slug "$repo_candidate")" "$latest"
+                return 0
+            fi
+        fi
+    done
+
+    printf '|'
+    return 1
+}
+
+# Split a bare image reference into "image_name|current_tag". Ported from
+# check_images.sh.
+extract_image_name_and_tag() {
+    local image_ref="$1"
+    local ref_no_digest="${image_ref%@*}"
+    local image_path
+    local image_name
+    local current_tag
+
+    local first_seg="${ref_no_digest%%/*}"
+    if [[ "$ref_no_digest" == */* ]] && [[ "$first_seg" == *.* || "$first_seg" == *:* || "$first_seg" == "localhost" ]]; then
+        image_path="${ref_no_digest#*/}"
+    else
+        image_path="$ref_no_digest"
+    fi
+
+    local last_seg="${image_path##*/}"
+    if [[ "$last_seg" == *:* ]]; then
+        current_tag="${last_seg##*:}"
+        image_name="${last_seg%%:*}"
+    else
+        current_tag="latest"
+        image_name="$last_seg"
+    fi
+
+    printf '%s|%s\n' "$image_name" "$current_tag"
+}
+
+replace_ref_tag() {
+    local ref="$1" new_tag="$2"
+    printf '%s:%s\n' "${ref%:*}" "$new_tag"
+}
+
+results_file=$(mktemp)
+trap 'rm -f "$results_file"' EXIT
+
+total=0
+while IFS= read -r image; do
+    [[ -n "$image" ]] || continue
+    [[ "$image" == \#* ]] && continue
+    total=$((total + 1))
+
+    echo "[$total] Checking latest tag for $image" >&2
+
+    parsed=$(extract_image_name_and_tag "$image")
+    image_name="${parsed%%|*}"
+    current_tag="${parsed##*|}"
+
+    repo_latest=$(find_build_repo_and_latest_tag "$image_name" || true)
+    build_repo="${repo_latest%%|*}"
+    latest_tag="${repo_latest##*|}"
+
+    if [[ -z "$build_repo" || -z "$latest_tag" ]]; then
+        status="UNKNOWN"
+        latest_image=""
+    elif [[ "$current_tag" == "$latest_tag" ]]; then
+        status="UP_TO_DATE"
+        latest_image="$image"
+    else
+        status="NEEDS_UPDATE"
+        latest_image=$(replace_ref_tag "$image" "$latest_tag")
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$image" "$image_name" "$current_tag" "${build_repo:-}" "${latest_tag:-}" "$status" "${latest_image:-}" \
+        >> "$results_file"
+done < <(awk 'NF && $1 !~ /^#/ {print $1}' "$images_file")
+
+json=$(python3 - "$results_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+out = []
+with open(path, encoding="utf-8") as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        parts = line.split("\t")
+        while len(parts) < 7:
+            parts.append("")
+        image, image_name, current_tag, build_repo, latest_tag, status, latest_image = parts[:7]
+        out.append({
+            "image": image,
+            "image_name": image_name,
+            "current_tag": current_tag,
+            "build_repo": build_repo or None,
+            "latest_tag": latest_tag or None,
+            "status": status,
+            "latest_image": latest_image or None,
+        })
+print(json.dumps(out))
+PY
+)
+
+if [[ -n "$output_file" ]]; then
+    printf '%s\n' "$json" > "$output_file"
+else
+    printf '%s\n' "$json"
+fi

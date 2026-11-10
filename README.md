@@ -33,15 +33,27 @@ upstream [`contrib/vexscan-dashboard.py`](https://github.com/cwayne18/vexscan/bl
     unless a fleet list generated from that same release replaces it.
   With `--source-xref` it additionally cross-references stripped Go component
   binaries against their upstream source (see below) before the main scan.
+  With `--staleness-check` it additionally flags images whose scanned tag is
+  behind the latest one their build repo has published (see below).
 - **`.github/workflows/scan-report.yml`** runs the scan daily (and on demand),
   renders each run into `reports/html/<scan-id>/` with `vexscan-dashboard.py`,
-  rebuilds the landing page, and commits the results.
+  injects staleness banners into the per-image pages that need them, rebuilds
+  the landing page, and commits the results.
 - **`.github/scripts/generate_index.py`** builds `reports/html/index.html`, the
-  landing page listing every run (styled after rke2-toolbox's index).
+  landing page listing every run (styled after rke2-toolbox's index), including
+  a badge — and the specific images and tag deltas behind it — for any run
+  with images behind their latest available tag.
+- **`.github/scripts/inject_staleness_banners.py`** adds a small warning banner
+  to the individual per-image report pages (rendered by `vexscan-dashboard.py`)
+  for any image that badge flags, linking back to the landing page's summary.
+  See below.
 - **`.github/workflows/deploy-pages.yml`** publishes `reports/html/` to GitHub Pages.
 - **`gen-rke2-vexscan`** builds a *fleet list* for a release or branch — the
   image list plus, per image, how RKE2 actually starts it. `scan.sh` runs it
   automatically. See below.
+- **`check-latest-tags`** resolves, for a bare image list, the latest tag each
+  image's build repo has published on GitHub. `scan.sh --staleness-check` runs
+  it automatically. See below.
 
 ## `gen-rke2-vexscan` — saying how each image is started
 
@@ -216,6 +228,52 @@ whole `kubernetes` module downloads its module graph and builds it, which
 `vexscan`'s own docs note can need several GB of RAM. The scheduled daily scan
 (`.github/workflows/scan-report.yml`) enables it explicitly.
 
+## Flagging images behind their latest available tag (`--staleness-check`)
+
+A scan only ever reports what the scanned branch/release actually pins. If
+`master` still ships `hardened-coredns:v1.11.3-build20241217` but
+`image-build-coredns` has since cut `v1.14.7-build20261020`, a clean master
+scan says nothing about the CVEs that later build already fixes.
+`--staleness-check` closes that gap without touching the main scan:
+
+1. **`./check-latest-tags`** takes the same bare image list `scan.sh` just
+   built, and for each image resolves its build repo (`image-build-<name>`,
+   with the same per-image overrides rke2-toolbox's
+   [`check_images.sh`](https://github.com/cwayne18/rke2-toolbox/blob/main/check_images.sh)
+   uses — e.g. `kube-webhook-certgen`/`nginx-ingress-controller` →
+   `rancher/ingress-nginx`, constrained to the right hardened/prime tag line)
+   and the latest stable tag that repo has published on GitHub. The override
+   tables are copied from `check_images.sh` and must be kept in sync with it,
+   or a verdict here can silently diverge from that script's.
+2. Any image whose scanned tag differs from the latest one is rescanned —
+   once, only that image, at the latest tag — with the same `--vexhub`,
+   `--prefer-vendor`, `--severity` and `--fixed-only` settings as the main
+   scan, so the two are directly comparable.
+3. Both the per-image version staleness and the actionable (post-filter) CVE
+   counts at the scanned tag vs. the latest tag are written into the report's
+   `staleness` field — never into `results`, so the main CRITICAL/HIGH/
+   fixed-only numbers are identical whether or not this is enabled.
+4. `.github/scripts/generate_index.py` reads that field and adds a badge to
+   the run's card on the landing page (e.g. *"2 images behind latest (3 CVEs
+   fixed by updating)"*) when any image is behind, plus a breakdown per image
+   (name, current tag → latest tag, CVEs fixed).
+5. `.github/scripts/inject_staleness_banners.py` also drops a small warning
+   banner into each flagged image's own per-image report page — e.g. *"A
+   newer tag is available: coredns v1.14.8-build20261105 — fixes 1 additional
+   CVE"* — linking back to that run's card on the landing page. Those
+   per-image pages are rendered by the upstream `vexscan-dashboard.py`, which
+   has no notion of staleness, so this is a best-effort pass over its
+   already-rendered HTML: any image it can't confidently match to a page is
+   skipped with a warning rather than guessed at, and nothing it does can
+   change that page's own findings/verdicts.
+
+Any failure along the way (tag resolution, the rescan, locating a page to
+banner, ...) warns and continues rather than aborting the main scan.
+
+Off by default: it makes GitHub API calls per image and a second, smaller
+vexscan pass. The scheduled daily scan enables it explicitly, authenticating
+those API calls with `GH_TOKEN` to avoid the 60/hour anonymous rate limit.
+
 ## Running locally
 
 Install the scan engine and fetch the dashboard renderer:
@@ -245,7 +303,8 @@ Scan a published release:
 Usage: scan.sh [branch] [--release <version>] [--prime] [--no-prime]
                [--vexhub <url>] [--prefer-vendor <vendor>] [--severity <list>]
                [--fixed-only] [--no-fixed-only] [--runtime] [--no-runtime]
-               [--source-xref] [--no-source-xref] [--output <file>]
+               [--source-xref] [--no-source-xref] [--staleness-check]
+               [--no-staleness-check] [--output <file>]
 ```
 
 - `branch` — build the image list from this RKE2 branch (default `master`).
@@ -268,6 +327,11 @@ Usage: scan.sh [branch] [--release <version>] [--prime] [--no-prime]
   component binaries against their upstream source in govulncheck source mode
   (see above). Off by default: expensive, downloads the kubernetes module
   graph. The scheduled daily scan enables it.
+- `--staleness-check` / `--no-staleness-check` — also flag images whose
+  scanned tag is behind the latest one their build repo has published, and
+  rescan those at the latest tag for comparison (see above). Off by default:
+  extra GitHub API calls and a second, smaller vexscan pass. The scheduled
+  daily scan enables it.
 - `--output <file>` — JSON output path (default `scan.json`).
 
 ## License

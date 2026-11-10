@@ -44,6 +44,7 @@ severity_filter="CRITICAL,HIGH"
 fixed_only="true"
 scan_runtime_image="true"
 source_xref="false"
+staleness_check="false"
 # Registry used to reproduce PRIME builds. build-images emits the PRIME/hardened
 # image variants only when REGISTRY != docker.io; the final scan targets
 # registry.rancher.com.
@@ -54,7 +55,8 @@ usage() {
     echo "Usage: $0 [branch] [--release <version>] [--prime] [--no-prime]"
     echo "          [--vexhub <url>] [--prefer-vendor <vendor>] [--severity <list>]"
     echo "          [--fixed-only] [--no-fixed-only] [--runtime] [--no-runtime]"
-    echo "          [--source-xref] [--no-source-xref] [--output <file>]"
+    echo "          [--source-xref] [--no-source-xref] [--staleness-check]"
+    echo "          [--no-staleness-check] [--output <file>]"
     echo ""
     echo "Examples:"
     echo "  $0                         # scan master (built from source)"
@@ -67,6 +69,7 @@ usage() {
     echo "  $0 --no-runtime            # skip the rke2-runtime image tarball scan"
     echo "  $0 --source-xref           # also cross-reference stripped Go binaries"
     echo "                             # against their upstream source in source mode"
+    echo "  $0 --staleness-check       # also flag images behind their latest build"
     echo "  $0 --output rke2-master.json"
     echo ""
     echo "By default the report is limited to CRITICAL/HIGH findings that have a fix."
@@ -77,6 +80,12 @@ usage() {
     echo "pinned upstream repo, to rule out findings the stripped-binary pclntab"
     echo "test can only call 'linked'. Off by default: expensive (downloads the"
     echo "kubernetes module graph) and not needed for most scans."
+    echo "--staleness-check resolves, via ./check-latest-tags, the latest tag each"
+    echo "scanned image's build repo has published, and for any image behind its"
+    echo "latest tag, rescans it at that tag and records both findings so the"
+    echo "report can show whether the scanned ref is missing fixes the latest"
+    echo "available build already has. Off by default: extra GitHub API calls and"
+    echo "a second, smaller vexscan pass. Never changes the main scan's findings."
     echo "Note: scheduled scans run '$0 master --prime'."
 }
 
@@ -115,6 +124,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-source-xref)
             source_xref="false"
+            shift
+            ;;
+        --staleness-check)
+            staleness_check="true"
+            shift
+            ;;
+        --no-staleness-check)
+            staleness_check="false"
             shift
             ;;
         --vexhub)
@@ -459,6 +476,7 @@ generate_source_vex() {
 rm -f "$output_file" fleet.txt source-refs.txt
 rm -rf source-vex
 rm -f images.txt
+rm -f staleness-images.txt staleness-tags.json stale-images.txt staleness-scan.json
 
 # vexscan's --images-from accepts a URL or a file. In release mode we hand it
 # the release URL untouched unless a fleet list can be generated for it; in
@@ -758,6 +776,250 @@ elif "findings" in doc:
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(doc, fh)
 PY
+fi
+
+# --staleness-check: resolve, via ./check-latest-tags, whether each scanned
+# image's tag is behind the latest one its build repo has published, and if
+# so, rescan it at that latest tag to compare CVE counts. This only ever adds
+# a "staleness" field to the report below; it never touches the findings
+# above, so the main CRITICAL/HIGH/fixed-only numbers are unaffected whether
+# or not this is enabled.
+if [[ "$staleness_check" == "true" ]]; then
+    echo "Checking whether scanned images are behind their latest available tag..."
+
+    staleness_refs="staleness-images.txt"
+    case "$images_source" in
+        http://*|https://*)
+            curl -fsSL "$images_source" -o "${staleness_refs}.raw" 2>/dev/null || true
+            ;;
+        *)
+            cp "${images_source#./}" "${staleness_refs}.raw" 2>/dev/null || true
+            ;;
+    esac
+    if [[ -s "${staleness_refs}.raw" ]]; then
+        awk 'NF && $1 !~ /^#/ {print $1}' "${staleness_refs}.raw" > "$staleness_refs"
+    fi
+    rm -f "${staleness_refs}.raw"
+
+    tags_json=""
+    if [[ -s "$staleness_refs" ]]; then
+        tags_log=$(mktemp)
+        prime_flag=()
+        [[ "$use_prime_ingress" == "true" ]] && prime_flag=(--prime)
+        if tags_json=$("$script_dir/check-latest-tags" "$staleness_refs" "${prime_flag[@]}" 2>"$tags_log"); then
+            cat "$tags_log" >&2
+        else
+            echo "Warning: check-latest-tags failed; skipping staleness check" >&2
+            cat "$tags_log" >&2
+            tags_json=""
+        fi
+        rm -f "$tags_log"
+    else
+        echo "Warning: could not resolve an image list for the staleness check; skipping" >&2
+    fi
+    rm -f "$staleness_refs"
+
+    if [[ -n "$tags_json" ]]; then
+        tags_json_file="staleness-tags.json"
+        printf '%s' "$tags_json" > "$tags_json_file"
+
+        stale_refs_file="stale-images.txt"
+        python3 - "$tags_json_file" "$stale_refs_file" <<'PY'
+import json
+import sys
+
+tags_path, out_path = sys.argv[1:3]
+with open(tags_path, encoding="utf-8") as fh:
+    entries = json.load(fh)
+
+lines = [e["latest_image"] for e in entries
+         if e.get("status") == "NEEDS_UPDATE" and e.get("latest_image")]
+with open(out_path, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines))
+PY
+
+        staleness_scan_file=""
+        if [[ -s "$stale_refs_file" ]]; then
+            echo "Rescanning $(wc -l < "$stale_refs_file" | tr -d ' ') image(s) at their latest available tag..."
+            staleness_scan_file="staleness-scan.json"
+            rm -f "$staleness_scan_file"
+            stale_args=(--images-from "./${stale_refs_file}" --all --triage --vexhub "$vexhub")
+            if [[ -n "$source_vexhub" ]]; then
+                stale_args+=(--vexhub "$source_vexhub")
+            fi
+            stale_args+=(--prefer-vendor "$prefer_vendor")
+            if [[ -n "$severity_filter" ]]; then
+                stale_args+=(--severity "$severity_filter")
+            fi
+            stale_args+=(--format json)
+
+            stale_log=$(mktemp)
+            if vexscan "${stale_args[@]}" > "$staleness_scan_file" 2>"$stale_log" && [[ -s "$staleness_scan_file" ]]; then
+                if [[ "$fixed_only" == "true" ]]; then
+                    python3 - "$staleness_scan_file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fh:
+    doc = json.load(fh)
+
+
+def has_fix(finding):
+    if finding.get("fixed_version"):
+        return True
+    return bool(finding.get("fixed_versions"))
+
+
+def filter_result(result):
+    findings = result.get("findings") or []
+    result["findings"] = [f for f in findings if has_fix(f)]
+
+
+if isinstance(doc.get("results"), list):
+    for result in doc["results"]:
+        if result:
+            filter_result(result)
+elif "findings" in doc:
+    filter_result(doc)
+
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
+                fi
+            else
+                echo "Warning: staleness rescan failed; CVE counts for the latest tag will be omitted" >&2
+                cat "$stale_log" >&2
+                staleness_scan_file=""
+            fi
+            rm -f "$stale_log"
+        fi
+
+        echo "Recording staleness comparison into ${output_file}..."
+        python3 - "$output_file" "$tags_json_file" "${staleness_scan_file:-}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+main_path, tags_path, staleness_scan_path = sys.argv[1:4]
+
+with open(main_path, encoding="utf-8") as fh:
+    main = json.load(fh)
+with open(tags_path, encoding="utf-8") as fh:
+    tags = json.load(fh)
+
+staleness_scan = None
+if staleness_scan_path:
+    try:
+        with open(staleness_scan_path, encoding="utf-8") as fh:
+            staleness_scan = json.load(fh)
+    except (OSError, ValueError):
+        staleness_scan = None
+
+# Mirrors .github/scripts/generate_index.py's bucket_of: only "affected"
+# (vulnerable and not VEXed) findings count toward the CVE totals below.
+EXCULPATORY = ("not_affected", "fixed")
+
+
+def is_affected(finding):
+    if finding.get("status") not in ("linked", "reachable"):
+        return False
+    vex = finding.get("vex") or {}
+    return vex.get("status") not in EXCULPATORY
+
+
+def severity_of(finding):
+    sev = (finding.get("severity") or "").strip()
+    return sev if sev else "UNKNOWN"
+
+
+def iter_results(doc):
+    if not doc:
+        return []
+    if isinstance(doc.get("results"), list):
+        return [r for r in doc["results"] if r]
+    if "findings" in doc:
+        return [doc]
+    return []
+
+
+def affected_counts_by_target(doc):
+    counts = {}
+    for result in iter_results(doc):
+        target = result.get("target")
+        if not target:
+            continue
+        by_sev = {}
+        for finding in result.get("findings") or []:
+            if not is_affected(finding):
+                continue
+            sev = severity_of(finding)
+            by_sev[sev] = by_sev.get(sev, 0) + 1
+        counts[target] = by_sev
+    return counts
+
+
+current_counts = affected_counts_by_target(main)
+latest_counts = affected_counts_by_target(staleness_scan)
+
+images = []
+needs_update = up_to_date = unknown = rescanned = 0
+affected_current_total = affected_latest_total = 0
+
+for entry in tags:
+    status = entry.get("status")
+    if status == "NEEDS_UPDATE":
+        needs_update += 1
+    elif status == "UP_TO_DATE":
+        up_to_date += 1
+    else:
+        unknown += 1
+
+    findings_current = current_counts.get(entry["image"])
+    findings_latest = None
+    if status == "UP_TO_DATE":
+        findings_latest = findings_current
+    elif status == "NEEDS_UPDATE" and entry.get("latest_image") in latest_counts:
+        findings_latest = latest_counts[entry["latest_image"]]
+        rescanned += 1
+
+    if findings_current:
+        affected_current_total += sum(findings_current.values())
+    if findings_latest:
+        affected_latest_total += sum(findings_latest.values())
+
+    images.append({
+        "image": entry["image"],
+        "image_name": entry["image_name"],
+        "current_tag": entry["current_tag"],
+        "build_repo": entry.get("build_repo"),
+        "latest_tag": entry.get("latest_tag"),
+        "latest_image": entry.get("latest_image"),
+        "status": status,
+        "findings_current": findings_current,
+        "findings_latest": findings_latest,
+    })
+
+main["staleness"] = {
+    "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "images": images,
+    "summary": {
+        "total": len(tags),
+        "needs_update": needs_update,
+        "up_to_date": up_to_date,
+        "unknown": unknown,
+        "rescanned": rescanned,
+        "affected_current": affected_current_total,
+        "affected_latest": affected_latest_total,
+    },
+}
+
+with open(main_path, "w", encoding="utf-8") as fh:
+    json.dump(main, fh)
+PY
+    fi
+else
+    echo "Skipping staleness check (--staleness-check not set)"
 fi
 
 echo "Wrote scan report to ${output_file}"
