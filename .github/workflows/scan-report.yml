@@ -92,6 +92,11 @@ jobs:
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
 
       - name: Run scan.sh
+        env:
+          # check-latest-tags resolves each image's build repo's latest tag
+          # via the GitHub API; this authenticates those calls so a fleet of
+          # ~40+ images doesn't hit the 60/hour anonymous rate limit.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           bash scan.sh ${{ steps.scan_args.outputs.args }} \
             --vexhub "$VEXHUB" \
@@ -99,6 +104,7 @@ jobs:
             --severity "$SEVERITY" \
             --fixed-only \
             --source-xref \
+            --staleness-check \
             --output scan.json
 
       - name: Determine scan id

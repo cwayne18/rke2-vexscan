@@ -185,6 +185,7 @@ h2 .sub-count {
 .badge-worst-MEDIUM   { background: var(--sev-medium);   color:#473900; border-color:#E5A200; }
 .badge-worst-LOW      { background: rgba(31,103,219,.15); color: var(--sev-low); border-color: rgba(31,103,219,.4); }
 .badge-worst-UNKNOWN  { background: #6C6C76; color:#FFF; border-color:#4A4A52; }
+.badge-stale      { background: rgba(229,162,0,.15); color: #7A5900; border-color: rgba(229,162,0,.4); }
 .rc-meta { color: var(--muted); font-size: 12px; }
 
 .empty-state { color: var(--muted); font-style: italic; }
@@ -310,7 +311,21 @@ def summarize_run(json_path):
             elif b == BUCKET_VEXED:
                 vexed += 1
     targets = doc.get("targets") or len(results)
-    return {"targets": targets, "affected": affected, "vexed": vexed, "worst": worst}
+
+    # staleness.summary comes from scan.sh's --staleness-check: how many
+    # scanned images are behind their build repo's latest published tag, and
+    # the actionable CVE counts at the scanned tag vs. that latest tag.
+    staleness = (doc.get("staleness") or {}).get("summary") or {}
+
+    return {
+        "targets": targets,
+        "affected": affected,
+        "vexed": vexed,
+        "worst": worst,
+        "stale_needs_update": staleness.get("needs_update", 0),
+        "stale_affected_current": staleness.get("affected_current", 0),
+        "stale_affected_latest": staleness.get("affected_latest", 0),
+    }
 
 
 _DATE_RE = re.compile(r"(\d{8})")
@@ -353,6 +368,16 @@ def render_card(scan_id, summary):
             badges.append('<span class="badge badge-clear">clear</span>')
         meta = '<span class="rc-meta">%d images · %d vexed</span>' % (
             summary["targets"], summary["vexed"])
+
+        stale_count = summary.get("stale_needs_update") or 0
+        if stale_count > 0:
+            label = "%d image%s behind latest" % (stale_count, "" if stale_count == 1 else "s")
+            title = "Current tag(s) are behind the latest tag published by their build repo"
+            cve_delta = summary.get("stale_affected_current", 0) - summary.get("stale_affected_latest", 0)
+            if cve_delta > 0:
+                label += " (%d CVE%s fixed by updating)" % (cve_delta, "" if cve_delta == 1 else "s")
+                title = "Updating would resolve %d actionable CVE%s" % (cve_delta, "" if cve_delta == 1 else "s")
+            badges.append('<span class="badge badge-stale" title="%s">%s</span>' % (esc(title), esc(label)))
 
     search_key = ("%s %s %s" % (scan_id, date_str, badge_label)).lower()
     return (
