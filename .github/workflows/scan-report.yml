@@ -131,6 +131,8 @@ jobs:
           mkdir -p reports/html
           mv scan.json "reports/${SCAN_ID}.json"
           python3 vexscan-dashboard.py "reports/${SCAN_ID}.json" -o "reports/html/${SCAN_ID}/"
+          python3 .github/scripts/inject_staleness_banners.py \
+            "reports/${SCAN_ID}.json" "reports/html/${SCAN_ID}" "${SCAN_ID}"
           python3 .github/scripts/generate_index.py reports/html
 
       - name: Upload HTML report as artifact

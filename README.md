@@ -37,10 +37,16 @@ upstream [`contrib/vexscan-dashboard.py`](https://github.com/cwayne18/vexscan/bl
   behind the latest one their build repo has published (see below).
 - **`.github/workflows/scan-report.yml`** runs the scan daily (and on demand),
   renders each run into `reports/html/<scan-id>/` with `vexscan-dashboard.py`,
-  rebuilds the landing page, and commits the results.
+  injects staleness banners into the per-image pages that need them, rebuilds
+  the landing page, and commits the results.
 - **`.github/scripts/generate_index.py`** builds `reports/html/index.html`, the
   landing page listing every run (styled after rke2-toolbox's index), including
-  a badge for any run with images behind their latest available tag.
+  a badge — and the specific images and tag deltas behind it — for any run
+  with images behind their latest available tag.
+- **`.github/scripts/inject_staleness_banners.py`** adds a small warning banner
+  to the individual per-image report pages (rendered by `vexscan-dashboard.py`)
+  for any image that badge flags, linking back to the landing page's summary.
+  See below.
 - **`.github/workflows/deploy-pages.yml`** publishes `reports/html/` to GitHub Pages.
 - **`gen-rke2-vexscan`** builds a *fleet list* for a release or branch — the
   image list plus, per image, how RKE2 actually starts it. `scan.sh` runs it
@@ -249,10 +255,20 @@ scan says nothing about the CVEs that later build already fixes.
    fixed-only numbers are identical whether or not this is enabled.
 4. `.github/scripts/generate_index.py` reads that field and adds a badge to
    the run's card on the landing page (e.g. *"2 images behind latest (3 CVEs
-   fixed by updating)"*) when any image is behind.
+   fixed by updating)"*) when any image is behind, plus a breakdown per image
+   (name, current tag → latest tag, CVEs fixed).
+5. `.github/scripts/inject_staleness_banners.py` also drops a small warning
+   banner into each flagged image's own per-image report page — e.g. *"A
+   newer tag is available: coredns v1.14.8-build20261105 — fixes 1 additional
+   CVE"* — linking back to that run's card on the landing page. Those
+   per-image pages are rendered by the upstream `vexscan-dashboard.py`, which
+   has no notion of staleness, so this is a best-effort pass over its
+   already-rendered HTML: any image it can't confidently match to a page is
+   skipped with a warning rather than guessed at, and nothing it does can
+   change that page's own findings/verdicts.
 
-Any failure along the way (tag resolution, the rescan, ...) warns and leaves
-the `staleness` field out rather than aborting the main scan.
+Any failure along the way (tag resolution, the rescan, locating a page to
+banner, ...) warns and continues rather than aborting the main scan.
 
 Off by default: it makes GitHub API calls per image and a second, smaller
 vexscan pass. The scheduled daily scan enables it explicitly, authenticating
