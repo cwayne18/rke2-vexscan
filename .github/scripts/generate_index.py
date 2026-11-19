@@ -328,8 +328,6 @@ def summarize_run(json_path):
         "vexed": vexed,
         "worst": worst,
         "stale_needs_update": staleness.get("needs_update", 0),
-        "stale_affected_current": staleness.get("affected_current", 0),
-        "stale_affected_latest": staleness.get("affected_latest", 0),
         "stale_images": _stale_image_details(staleness_doc.get("images") or []),
     }
 
@@ -341,15 +339,17 @@ def _stale_image_details(images):
     for img in images:
         if img.get("status") != "NEEDS_UPDATE":
             continue
-        findings_current = img.get("findings_current") or {}
+        findings_current = img.get("findings_current")
         findings_latest = img.get("findings_latest")
         delta = None
-        if findings_latest is not None:
+        if findings_current is not None and findings_latest is not None:
             delta = sum(findings_current.values()) - sum(findings_latest.values())
         details.append({
             "name": img.get("image_name") or img.get("image") or "?",
             "current_tag": img.get("current_tag") or "?",
             "latest_tag": img.get("latest_tag") or "?",
+            "current": sum(findings_current.values()) if findings_current is not None else None,
+            "latest": sum(findings_latest.values()) if findings_latest is not None else None,
             "delta": delta,
         })
     return details
@@ -401,12 +401,10 @@ def render_card(scan_id, summary):
         if stale_count > 0:
             label = "%d image%s behind latest" % (stale_count, "" if stale_count == 1 else "s")
             title = "Current tag(s) are behind the latest tag published by their build repo"
-            cve_delta = summary.get("stale_affected_current", 0) - summary.get("stale_affected_latest", 0)
-            if cve_delta > 0:
-                label += " (%d CVE%s fixed by updating)" % (cve_delta, "" if cve_delta == 1 else "s")
-                title = "Updating would resolve %d actionable CVE%s" % (cve_delta, "" if cve_delta == 1 else "s")
             badges.append('<span class="badge badge-stale" title="%s">%s</span>' % (esc(title), esc(label)))
-            stale_detail = _render_stale_detail(summary.get("stale_images") or [])
+            stale_images = summary.get("stale_images") or []
+            stale_detail = _render_update_comparison(summary["affected"], stale_count, stale_images)
+            stale_detail += _render_stale_detail(stale_images)
 
     search_key = ("%s %s %s" % (scan_id, date_str, badge_label)).lower()
     return (
@@ -428,6 +426,26 @@ def render_card(scan_id, summary):
 _STALE_DETAIL_LIMIT = 4
 
 
+def _render_update_comparison(affected, stale_count, stale_images):
+    compared = [img for img in stale_images if img["delta"] is not None]
+    coverage = "%d/%d updated images compared" % (len(compared), stale_count)
+    if not compared:
+        text = "Updated-image CVE counts unavailable (%s)." % coverage
+    else:
+        current = sum(img["current"] for img in compared)
+        latest = sum(img["latest"] for img in compared)
+        delta = current - latest
+        change = ("%d fewer" % delta if delta > 0 else
+                  "%d more" % -delta if delta < 0 else "no net change")
+        text = "Compared images: %d → %d affected CVE instances (%s)." % (current, latest, change)
+        text += " Fleet with these updates: %d → %d." % (affected, affected - delta)
+        if len(compared) < stale_count:
+            text += " Partial comparison (%s); other images unchanged." % coverage
+        else:
+            text += " Other images unchanged."
+    return '<div class="rc-stale-detail">%s</div>' % esc(text)
+
+
 def _render_stale_detail(stale_images):
     """Compact per-image breakdown shown under the stale badge: name, tag
     change, and CVE delta when the latest tag was successfully rescanned."""
@@ -437,12 +455,16 @@ def _render_stale_detail(stale_images):
     for img in stale_images[:_STALE_DETAIL_LIMIT]:
         delta = img["delta"]
         if delta is None:
-            delta_html = ""
+            delta_html = ' <span class="delta">&mdash; CVE comparison unavailable</span>'
         elif delta > 0:
-            delta_html = ' <span class="delta">&mdash; %d CVE%s fixed</span>' % (
-                delta, "" if delta == 1 else "s")
+            delta_html = ' <span class="delta">&mdash; %d &#8594; %d affected (%d fewer)</span>' % (
+                img["current"], img["latest"], delta)
+        elif delta < 0:
+            delta_html = ' <span class="delta">&mdash; %d &#8594; %d affected (%d more)</span>' % (
+                img["current"], img["latest"], -delta)
         else:
-            delta_html = ' <span class="delta">&mdash; no CVE change</span>'
+            delta_html = ' <span class="delta">&mdash; %d &#8594; %d affected (no net change)</span>' % (
+                img["current"], img["latest"])
         lines.append(
             '<div><strong>%s</strong> <span class="tag">%s &#8594; %s</span>%s</div>'
             % (esc(img["name"]), esc(img["current_tag"]), esc(img["latest_tag"]), delta_html)

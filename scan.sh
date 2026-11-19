@@ -824,18 +824,27 @@ if [[ "$staleness_check" == "true" ]]; then
         printf '%s' "$tags_json" > "$tags_json_file"
 
         stale_refs_file="stale-images.txt"
-        python3 - "$tags_json_file" "$stale_refs_file" <<'PY'
+        python3 - "$tags_json_file" "$stale_refs_file" "$images_source" <<'PY'
 import json
+import os
 import sys
 
-tags_path, out_path = sys.argv[1:3]
+tags_path, out_path, images_source = sys.argv[1:4]
 with open(tags_path, encoding="utf-8") as fh:
     entries = json.load(fh)
 
-lines = [e["latest_image"] for e in entries
+assertions = {}
+if os.path.isfile(images_source):
+    with open(images_source, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.strip().split(maxsplit=1)
+            if parts and not parts[0].startswith("#"):
+                assertions[parts[0]] = " " + parts[1] if len(parts) > 1 else ""
+
+lines = [e["latest_image"] + assertions.get(e["image"], "") for e in entries
          if e.get("status") == "NEEDS_UPDATE" and e.get("latest_image")]
 with open(out_path, "w", encoding="utf-8") as fh:
-    fh.write("\n".join(lines))
+    fh.writelines(image + "\n" for image in lines)
 PY
 
         staleness_scan_file=""
@@ -844,9 +853,7 @@ PY
             staleness_scan_file="staleness-scan.json"
             rm -f "$staleness_scan_file"
             stale_args=(--images-from "./${stale_refs_file}" --all --triage --vexhub "$vexhub")
-            if [[ -n "$source_vexhub" ]]; then
-                stale_args+=(--vexhub "$source_vexhub")
-            fi
+            # Source VEX was generated for the pinned binaries, not these builds.
             stale_args+=(--prefer-vendor "$prefer_vendor")
             if [[ -n "$severity_filter" ]]; then
                 stale_args+=(--severity "$severity_filter")
@@ -854,7 +861,26 @@ PY
             stale_args+=(--format json)
 
             stale_log=$(mktemp)
-            if vexscan "${stale_args[@]}" > "$staleness_scan_file" 2>"$stale_log" && [[ -s "$staleness_scan_file" ]]; then
+            if ! vexscan "${stale_args[@]}" > "$staleness_scan_file" 2>"$stale_log"; then
+                echo "Warning: some latest-tag scans failed; retaining successful results where available" >&2
+                cat "$stale_log" >&2
+            fi
+            if python3 - "$staleness_scan_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        doc = json.load(fh)
+    if not isinstance(doc, dict) or not (
+        isinstance(doc.get("results"), list) or "findings" in doc
+    ):
+        raise ValueError("expected a vexscan report")
+except (OSError, ValueError) as exc:
+    print("Warning: latest-tag CVE counts unavailable: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+PY
+            then
                 if [[ "$fixed_only" == "true" ]]; then
                     python3 - "$staleness_scan_file" <<'PY'
 import json
@@ -888,8 +914,6 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
                 fi
             else
-                echo "Warning: staleness rescan failed; CVE counts for the latest tag will be omitted" >&2
-                cat "$stale_log" >&2
                 staleness_scan_file=""
             fi
             rm -f "$stale_log"
@@ -913,7 +937,8 @@ if staleness_scan_path:
     try:
         with open(staleness_scan_path, encoding="utf-8") as fh:
             staleness_scan = json.load(fh)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        print("Warning: could not read latest-tag scan: %s" % exc, file=sys.stderr)
         staleness_scan = None
 
 # Mirrors .github/scripts/generate_index.py's bucket_of: only "affected"
@@ -983,9 +1008,9 @@ for entry in tags:
         findings_latest = latest_counts[entry["latest_image"]]
         rescanned += 1
 
-    if findings_current:
+    # Only sum matched pairs: an unavailable scan is not a zero-CVE image.
+    if findings_current is not None and findings_latest is not None:
         affected_current_total += sum(findings_current.values())
-    if findings_latest:
         affected_latest_total += sum(findings_latest.values())
 
     images.append({
