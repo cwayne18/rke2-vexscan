@@ -44,10 +44,10 @@ def build_target_href_map(run_index_path):
 
 
 def render_banner(img, scan_id):
-    findings_current = img.get("findings_current") or {}
+    findings_current = img.get("findings_current")
     findings_latest = img.get("findings_latest")
     delta = None
-    if findings_latest is not None:
+    if findings_current is not None and findings_latest is not None:
         delta = sum(findings_current.values()) - sum(findings_latest.values())
 
     name = img.get("image_name") or img.get("image") or "this image"

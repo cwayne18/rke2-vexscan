@@ -246,17 +246,26 @@ scan says nothing about the CVEs that later build already fixes.
    tables are copied from `check_images.sh` and must be kept in sync with it,
    or a verdict here can silently diverge from that script's.
 2. Any image whose scanned tag differs from the latest one is rescanned —
-   once, only that image, at the latest tag — with the same `--vexhub`,
-   `--prefer-vendor`, `--severity` and `--fixed-only` settings as the main
-   scan, so the two are directly comparable.
+   once, only that image, at the latest tag — with the same published
+   `--vexhub`, `--prefer-vendor`, `--severity` and `--fixed-only` settings and
+   fleet command/root assertions as the main scan. Generated source VEX is
+   not reused: it describes the pinned binaries, not the updated builds.
+   Successful results are retained even if another image cannot be pulled.
 3. Both the per-image version staleness and the actionable (post-filter) CVE
    counts at the scanned tag vs. the latest tag are written into the report's
    `staleness` field — never into `results`, so the main CRITICAL/HIGH/
    fixed-only numbers are identical whether or not this is enabled.
 4. `.github/scripts/generate_index.py` reads that field and adds a badge to
-   the run's card on the landing page (e.g. *"2 images behind latest (3 CVEs
-   fixed by updating)"*) when any image is behind, plus a breakdown per image
-   (name, current tag → latest tag, CVEs fixed).
+   the run's card on the landing page (e.g. *"2 images behind latest"*),
+   plus current vs. updated **affected CVE instance** counts per image and
+   the net change. The card also shows the projected fleet count with those
+   updates applied (e.g. *"66 → 50"*, 16 fewer), keeping all other images at
+   their current counts. These are instances, not distinct CVE IDs, matching
+   the card's affected total. Missing scans are never treated as zero:
+   incomplete comparisons show coverage and are explicitly marked partial.
+   Unknown tags and the separately built runtime remain unchanged; this is
+   not a claim that every image is on its latest tag. Older reports without
+   successful rescans show counts as unavailable rather than an invented delta.
 5. `.github/scripts/inject_staleness_banners.py` also drops a small warning
    banner into each flagged image's own per-image report page — e.g. *"A
    newer tag is available: coredns v1.14.8-build20261105 — fixes 1 additional
