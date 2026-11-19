@@ -12,6 +12,10 @@ spec = importlib.util.spec_from_file_location(
     "generate_index", ROOT / ".github/scripts/generate_index.py")
 index = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(index)
+spec = importlib.util.spec_from_file_location(
+    "inject_staleness_banners", ROOT / ".github/scripts/inject_staleness_banners.py")
+inject = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(inject)
 
 
 def image(name, current, latest):
@@ -134,6 +138,74 @@ class RescanTests(unittest.TestCase):
         self.assertEqual(doc["staleness"]["summary"]["rescanned"], 0)
         self.assertTrue(all(img["findings_latest"] is None
                             for img in doc["staleness"]["images"]))
+
+
+class IngressTagTests(unittest.TestCase):
+    def test_prime_tag_is_selected_across_minor_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "images.txt").write_text(
+                "registry.rancher.com/rancher/nginx-ingress-controller:v1.15.2-prime4\n")
+            gh = path / "gh"
+            gh.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = auth ]; then exit 0; fi\n'
+                'printf \'%s\\n\' '
+                "'{\"name\":\"v1.14.5-prime7\"}' "
+                "'{\"name\":\"v1.15.2-prime5\"}' "
+                "'{\"name\":\"v1.15.2-hardened9\"}'\n"
+            )
+            gh.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
+            result = subprocess.run(
+                [str(ROOT / "check-latest-tags"), str(path / "images.txt"), "--prime"],
+                env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)[0]["latest_tag"], "v1.15.2-prime5")
+            self.assertEqual(json.loads(result.stdout)[0]["status"], "NEEDS_UPDATE")
+
+
+class FleetIndexTests(unittest.TestCase):
+    def test_summary_lists_every_result_and_links_known_pages(self):
+        up_to_date = image("b", {"HIGH": 2}, {"HIGH": 2})
+        up_to_date.update(status="UP_TO_DATE", image="b:new",
+                          current_tag="new", latest_image="b:new")
+        unknown = image("c", None, None)
+        unknown.update(status="UNKNOWN", latest_tag=None, latest_image=None)
+        images = [image("a", {"HIGH": 10}, {"HIGH": 4}), up_to_date, unknown]
+        doc = {
+            "results": [{"target": "a:old", "findings": [
+                {"status": "linked", "severity": "HIGH"}]}],
+            "staleness": {
+                "images": images,
+                "summary": {
+                    "needs_update": 1, "up_to_date": 1, "unknown": 1,
+                },
+            },
+        }
+        html = inject.render_index_summary(
+            doc, {"a:old": "a.html", "b:new": "b.html"})
+        self.assertIn('id="staleness-summary"', html)
+        self.assertEqual(html.count("<tr><td>"), 3)
+        self.assertIn('<a href="a.html"><code>a</code></a>', html)
+        self.assertIn("10 &#8594; 4", html)
+        self.assertIn("6 fewer", html)
+        self.assertIn("UP TO DATE", html)
+        self.assertIn("UNKNOWN", html)
+
+    def test_fleet_summary_injection_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "index.html"
+            path.write_text(
+                '<html><main class="page-content"><h1>Fleet scan</h1></main></html>')
+            summary = '<section id="staleness-summary">results</section>'
+            self.assertTrue(inject.inject_index_summary(path, summary))
+            self.assertFalse(inject.inject_index_summary(path, summary))
+            self.assertEqual(path.read_text().count('id="staleness-summary"'), 1)
+
+    def test_image_banner_links_to_fleet_comparison(self):
+        banner = inject.render_banner(image("a", {"HIGH": 2}, {}))
+        self.assertIn('href="index.html#staleness-summary"', banner)
 
 
 if __name__ == "__main__":
