@@ -179,6 +179,11 @@ def render_index_summary(doc, target_href):
   <style>
     .staleness-summary { margin-bottom: 24px; }
     .staleness-summary h2 { margin-bottom: 8px; }
+    .staleness-summary .table-wrap {
+      max-width: 100%%; min-width: 0;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
     .staleness-summary .staleness-lead {
       display: flex; flex-wrap: wrap; gap: 6px 18px;
       margin-bottom: 10px; color: var(--muted); font-size: 13px;
@@ -200,7 +205,7 @@ def render_index_summary(doc, target_href):
     <span>%(needs_update)d images need updates · %(up_to_date)d up to date · %(unknown)d unknown</span>
     <span>%(compared_text)s</span>
   </div>
-  <div class="panel table-wrap">
+  <div class="panel table-wrap" tabindex="0" role="region" aria-label="Image update comparison table">
     <table class="report-table">
       <thead><tr><th>Image</th><th>Tag change</th><th>Status</th><th class="num">Affected findings</th><th>Change</th></tr></thead>
       <tbody>%(rows)s</tbody>

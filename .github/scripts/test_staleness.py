@@ -186,6 +186,10 @@ class FleetIndexTests(unittest.TestCase):
         html = inject.render_index_summary(
             doc, {"a:old": "a.html", "b:new": "b.html"})
         self.assertIn('id="staleness-summary"', html)
+        self.assertIn(".staleness-summary .table-wrap", html)
+        self.assertIn("overflow-x: auto", html)
+        self.assertIn('tabindex="0" role="region"', html)
+        self.assertIn('aria-label="Image update comparison table"', html)
         self.assertEqual(html.count("<tr><td>"), 3)
         self.assertIn('<a href="a.html"><code>a</code></a>', html)
         self.assertIn("10 &#8594; 4", html)
