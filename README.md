@@ -241,7 +241,8 @@ scan says nothing about the CVEs that later build already fixes.
    with the same per-image overrides rke2-toolbox's
    [`check_images.sh`](https://github.com/cwayne18/rke2-toolbox/blob/main/check_images.sh)
    uses — e.g. `kube-webhook-certgen`/`nginx-ingress-controller` →
-   `rancher/ingress-nginx`, constrained to the right hardened/prime tag line)
+   `rancher/ingress-nginx`, constrained to the hardened/prime tag family while
+   comparing versions across minor release lines)
    and the latest stable tag that repo has published on GitHub. The override
    tables are copied from `check_images.sh` and must be kept in sync with it,
    or a verdict here can silently diverge from that script's.
@@ -266,15 +267,17 @@ scan says nothing about the CVEs that later build already fixes.
    Unknown tags and the separately built runtime remain unchanged; this is
    not a claim that every image is on its latest tag. Older reports without
    successful rescans show counts as unavailable rather than an invented delta.
-5. `.github/scripts/inject_staleness_banners.py` also drops a small warning
-   banner into each flagged image's own per-image report page — e.g. *"A
-   newer tag is available: coredns v1.14.8-build20261105 — fixes 1 additional
-   CVE"* — linking back to that run's card on the landing page. Those
-   per-image pages are rendered by the upstream `vexscan-dashboard.py`, which
-   has no notion of staleness, so this is a best-effort pass over its
-   already-rendered HTML: any image it can't confidently match to a page is
-   skipped with a warning rather than guessed at, and nothing it does can
-   change that page's own findings/verdicts.
+5. `.github/scripts/inject_staleness_banners.py` adds a complete, linked image
+   update comparison table to the fleet scan index, including tags, status,
+   affected-finding counts, and change for every checked image. It also drops
+   a small warning banner into each flagged image's own report page — e.g.
+   *"A newer tag is available: coredns v1.14.8-build20261105 — fixes 1
+   additional CVE"* — linking to that fleet-level comparison. Those pages
+   are rendered by the upstream `vexscan-dashboard.py`, which has no notion
+   of staleness, so this is a best-effort pass over its already-rendered HTML:
+   any image it can't confidently match to a page is skipped with a warning
+   rather than guessed at, and nothing it does can change that page's own
+   findings/verdicts.
 
 Any failure along the way (tag resolution, the rescan, locating a page to
 banner, ...) warns and continues rather than aborting the main scan.

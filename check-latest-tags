@@ -83,16 +83,17 @@ repo_override() {
     esac
 }
 
-# For image sources built from a specific branch line, constrain tag matching.
-# In rancher/ingress-nginx this corresponds to the v1.14.x hardened/prime tags.
+# Constrain repositories that publish multiple tag families to stable RKE2
+# ingress builds. Do not pin ingress to a minor release: the latest build must
+# be selected across branch lines (for example, v1.15.x supersedes v1.14.x).
 # Ported verbatim from check_images.sh; keep in sync with that script.
 tag_regex_override() {
     case "$1" in
         kube-webhook-certgen|nginx-ingress-controller)
             if [[ "$use_prime_ingress" == "true" ]]; then
-                echo '^v1\.14\..*-prime[0-9]+$'
+                echo '^v[0-9]+\.[0-9]+\.[0-9]+-prime[0-9]+$'
             else
-                echo '^v1\.14\..*-hardened[0-9]+$'
+                echo '^v[0-9]+\.[0-9]+\.[0-9]+-hardened[0-9]+$'
             fi
             ;;
         *) echo "" ;;
