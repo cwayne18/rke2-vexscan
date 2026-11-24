@@ -28,7 +28,7 @@ env:
   # still carry CVEs. v0.24.0 is affected identically; this was never a v0.24.1
   # regression, which is why pinning back to v0.24.0 did not help.
   # See https://github.com/cwayne18/vexscan/issues/45.
-  VEXSCAN_VERSION: v0.24.5
+  VEXSCAN_VERSION: v0.24.6
   VEXSCAN_DASHBOARD_REF: main
   VEXHUB: https://github.com/rancher/vexhub
   PREFER_VENDOR: suse
