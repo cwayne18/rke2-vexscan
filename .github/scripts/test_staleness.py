@@ -164,6 +164,35 @@ class IngressTagTests(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout)[0]["latest_tag"], "v1.15.2-prime5")
             self.assertEqual(json.loads(result.stdout)[0]["status"], "NEEDS_UPDATE")
 
+    def test_build_date_wins_over_a_higher_but_stale_version(self):
+        # A branch can be cut (e.g. v2.17.0) and then abandoned well before
+        # the current, lower-numbered branch (v2.14.0) gets its newest
+        # build. The most recent build date should win over a plain
+        # version-number comparison.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "images.txt").write_text(
+                "registry.rancher.com/rancher/hardened-csi-node-driver-registrar"
+                ":v2.14.0-build20261110\n")
+            gh = path / "gh"
+            gh.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = auth ]; then exit 0; fi\n'
+                'printf \'%s\\n\' '
+                "'{\"name\":\"v2.14.0-build20261026\"}' "
+                "'{\"name\":\"v2.14.0-build20261110\"}' "
+                "'{\"name\":\"v2.17.0-build20260722\"}'\n"
+            )
+            gh.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"])
+            result = subprocess.run(
+                [str(ROOT / "check-latest-tags"), str(path / "images.txt")],
+                env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(result.stdout)[0]["latest_tag"], "v2.14.0-build20261110")
+            self.assertEqual(json.loads(result.stdout)[0]["status"], "UP_TO_DATE")
+
 
 class FleetIndexTests(unittest.TestCase):
     def test_summary_lists_every_result_and_links_known_pages(self):
