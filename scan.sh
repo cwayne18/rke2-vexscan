@@ -570,9 +570,13 @@ else
         rm -f "${ingress_images_file}.bak"
 
         # PRIME-only hardened vsphere images are emitted only when
-        # REGISTRY != docker.io. Regenerate just the vsphere list against the
-        # prime registry and swap it in so the scan reflects the hardened images
-        # shipped in PRIME builds.
+        # REGISTRY != docker.io, and rancher/rke2@f2f8846 later did the same
+        # for calico. Regenerate just those lists against the prime registry
+        # and swap them in so the scan reflects the hardened images shipped
+        # in PRIME builds. On branches predating the relevant PR, a given
+        # group's list is identical regardless of the registry, so this is
+        # effectively a no-op there.
+        prime_hardened_groups="vsphere calico"
         prime_build_dir="$work_dir/build-prime"
         mkdir -p "$prime_build_dir"
         if ! run_build_images "$prime_build_dir" "$prime_registry" \
@@ -580,9 +584,11 @@ else
             cat "$work_dir/build-images-prime.log"
             exit 1
         fi
-        if [[ -f "$prime_build_dir/images-vsphere.txt" ]]; then
-            cp "$prime_build_dir/images-vsphere.txt" "$work_dir/build/images-vsphere.txt"
-        fi
+        for grp in $prime_hardened_groups; do
+            if [[ -f "$prime_build_dir/images-${grp}.txt" ]]; then
+                cp "$prime_build_dir/images-${grp}.txt" "$work_dir/build/images-${grp}.txt"
+            fi
+        done
     fi
 
     # Full image list: every generated list, de-duplicated. The historical
